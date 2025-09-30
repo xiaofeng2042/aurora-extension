@@ -1,36 +1,36 @@
-# Aurora Chrome Extension
+# Aurora Chrome 扩展
 
-Aurora is evolving into a research companion that keeps the inspiring posts you like on X.com in sync with your Liner knowledge base. The extension will watch for new likes, capture the key metadata, and send the content straight to Liner so your reading queue stays organized.
+Aurora 正在发展成为一个研究助手，它能够将您在 X.com 上喜欢的启发性帖子与您的 Liner 知识库保持同步。该扩展将监控新的点赞，捕获关键元数据，并将内容直接发送到 Liner，使您的阅读队列保持有序。
 
-## Current Status
+## 当前状态
 
-- Minimal popup UI with rotating focus prompts (`src/popup.html`, `src/popup.js`).
-- Manifest v3 scaffold ready for additional background scripts and permissions (`src/manifest.json`).
-- Placeholder icons under `assets/icons/`; replace before release.
+- 带有轮换焦点提示的最小弹出界面（`src/popup.html`，`src/popup.js`）。
+- Manifest v3 脚手架已准备好用于额外的后台脚本和权限（`src/manifest.json`）。
+- `assets/icons/` 下的占位图标；发布前需替换。
 
-## Planned Workflow
+## 计划工作流程
 
-1. Authenticate the user against X.com to access the `favorites/list` (likes) endpoint.
-2. Poll or stream liked posts, normalizing title, author, URL, and timestamp.
-3. Push each like into the Liner API with proper rate limiting and retry handling.
-4. Surface sync activity inside the Aurora popup so users can confirm recently transferred posts.
+1. 对用户进行 X.com 身份验证以访问 `favorites/list`（点赞）端点。
+2. 轮询或流式获取点赞的帖子，规范化标题、作者、URL 和时间戳。
+3. 将每个点赞推送到 Liner API，并进行适当的速率限制和重试处理。
+4. 在 Aurora 弹出窗口中显示同步活动，以便用户确认最近传输的帖子。
 
-## Getting Started
+## 入门指南
 
-1. Open `chrome://extensions/` in a Chromium-based browser.
-2. Enable **Developer mode**.
-3. Click **Load unpacked** and choose the repository's `src/` directory.
+1. 在基于 Chromium 的浏览器中打开 `chrome://extensions/`。
+2. 启用**开发者模式**。
+3. 点击**加载已解压的扩展程序**并选择仓库的 `src/` 目录。
 
-## Development Notes
+## 开发说明
 
-- Background/service worker logic will live under `src/background/` (to be implemented).
-- Shared helpers for X.com and Liner integrations should be added under `src/shared/`.
-- Secrets (API tokens, cookies) belong in a gitignored `.env.local`; document required keys in `docs/configuration.md` when defined.
+- 后台/服务工作者逻辑将位于 `src/background/`（待实现）。
+- X.com 和 Liner 集成的共享帮助程序应添加到 `src/shared/` 下。
+- 机密信息（API 令牌、cookies）应放在 gitignored 的 `.env.local` 中；在定义时在 `docs/configuration.md` 中记录所需的密钥。
 
-## Roadmap
+## 路线图
 
-- [ ] Build authenticated client for X.com likes.
-- [ ] Implement Liner API wrapper with retry safeguards.
-- [ ] Persist sync state locally to avoid duplicate transfers.
-- [ ] Replace popup placeholder with sync insights and manual retry controls.
-- [ ] Design a distinctive icon set for Aurora.
+- [ ] 构建 X.com 点赞的已认证客户端。
+- [ ] 实现带有重试保障的 Liner API 包装器。
+- [ ] 在本地保存同步状态以避免重复传输。
+- [ ] 用同步洞察和手动重试控件替换弹出窗口占位符。
+- [ ] 为 Aurora 设计独特的图标集。
