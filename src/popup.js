@@ -22,7 +22,15 @@ const elements = {
   teamSelectContainer: document.getElementById("teamSelectContainer"),
   currentTeamInfo: document.getElementById("currentTeamInfo"),
   currentTeamName: document.getElementById("currentTeamName"),
+  debugSection: document.getElementById("debugSection"),
+  debugContent: document.getElementById("debugContent"),
+  toggleDebugBtn: document.getElementById("toggleDebugBtn"),
+  clearDebugBtn: document.getElementById("clearDebugBtn"),
+  testSyncBtn: document.getElementById("testSyncBtn"),
 };
+
+// 调试日志存储
+let debugLogs = [];
 
 /**
  * 加载统计数据
@@ -95,34 +103,114 @@ async function loadRecentPosts() {
  */
 async function checkConnectionStatus() {
   try {
-    console.log("Checking Linear connection status...");
+    addDebugLog("开始检查 Linear 连接状态");
+
+    // 首先检查配置完整性
+    const configCheck = await checkConfiguration();
+    if (!configCheck.valid) {
+      addDebugLog("配置检查失败", configCheck);
+      elements.statusBadge.textContent = "配置不完整";
+      elements.statusBadge.classList.remove("active");
+      elements.statusBadge.classList.add("inactive");
+      updateConnectionStatus(false);
+      return;
+    }
+
+    addDebugLog("配置验证通过，开始连接测试");
     const status = await chrome.runtime.sendMessage({
       type: "CHECK_LINEAR_CONNECTION",
     });
 
-    console.log("Received connection status:", status);
+    addDebugLog("连接状态检查结果", status);
 
     if (status.connected) {
-      console.log("Linear connection successful!");
+      addDebugLog("Linear 连接成功");
       elements.statusBadge.textContent = "已连接";
       elements.statusBadge.classList.remove("inactive");
       elements.statusBadge.classList.add("active");
-
       updateConnectionStatus(true);
     } else {
-      console.log("Linear connection failed:", status.error);
-      elements.statusBadge.textContent = "未连接";
+      addDebugLog("Linear 连接失败", { error: status.error });
+      elements.statusBadge.textContent = "连接失败";
       elements.statusBadge.classList.remove("active");
       elements.statusBadge.classList.add("inactive");
-
       updateConnectionStatus(false);
     }
   } catch (error) {
+    addDebugLog("连接状态检查出错", { error: error.message });
     console.error("Error checking connection:", error);
     elements.statusBadge.textContent = "连接错误";
     elements.statusBadge.classList.remove("active");
     elements.statusBadge.classList.add("inactive");
     updateConnectionStatus(false);
+  }
+}
+
+/**
+ * 检查配置完整性
+ */
+async function checkConfiguration() {
+  try {
+    addDebugLog("开始检查配置完整性");
+
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_DEBUG_INFO",
+    });
+
+    const issues = [];
+
+    if (!response) {
+      addDebugLog("无法获取调试信息");
+      return {
+        valid: false,
+        issues: ["无法获取扩展状态信息"]
+      };
+    }
+
+    // 检查 Token
+    if (response.storage.linearToken === "未配置") {
+      issues.push("Linear API Token 未配置");
+      addDebugLog("Linear API Token 未配置");
+    } else {
+      addDebugLog("Linear API Token 已配置");
+    }
+
+    // 检查团队 ID
+    if (response.storage.linearTeamId === "未配置") {
+      issues.push("Linear 团队 ID 未配置");
+      addDebugLog("Linear 团队 ID 未配置");
+    } else {
+      addDebugLog("Linear 团队 ID 已配置");
+    }
+
+    // 检查存储使用情况
+    if (response.storage.storageUsage) {
+      const usage = response.storage.storageUsage;
+      if (usage.percentage > 90) {
+        issues.push(`存储空间即将用完 (${usage.percentage.toFixed(1)}%)`);
+        addDebugLog("存储空间警告", { usage });
+      }
+    }
+
+    // 检查同步队列
+    if (response.storage.queueSize > 0) {
+      addDebugLog("发现待同步队列", { queueSize: response.storage.queueSize });
+    }
+
+    const valid = issues.length === 0;
+    addDebugLog(`配置检查完成: ${valid ? "通过" : "失败"}`, { issues });
+
+    return {
+      valid,
+      issues,
+      config: response
+    };
+  } catch (error) {
+    addDebugLog("配置检查出错", { error: error.message });
+    return {
+      valid: false,
+      issues: [`配置检查出错: ${error.message}`]
+    };
   }
 }
 
@@ -377,6 +465,59 @@ function handleTeamSelectChange() {
 }
 
 /**
+ * 测试同步功能
+ */
+async function testSync() {
+  elements.testSyncBtn.textContent = "测试中...";
+  elements.testSyncBtn.disabled = true;
+
+  try {
+    addDebugLog("开始测试同步功能");
+
+    // 创建测试推文数据
+    const testTweet = {
+      tweetId: "test_" + Date.now(),
+      author: {
+        name: "测试用户",
+        handle: "test_user"
+      },
+      text: "这是一个测试推文，用于验证 Aurora 扩展的同步功能是否正常工作。",
+      timestamp: new Date().toISOString(),
+      url: "https://x.com/test_user/status/" + Date.now(),
+      media: {
+        images: [],
+        videos: []
+      }
+    };
+
+    addDebugLog("发送测试推文到后台", { tweetId: testTweet.tweetId });
+
+    const response = await chrome.runtime.sendMessage({
+      type: "NEW_LIKED_POST",
+      payload: testTweet
+    });
+
+    addDebugLog("测试同步响应", response);
+
+    if (response?.success) {
+      elements.testSyncBtn.textContent = "测试成功 ✓";
+      addDebugLog("测试同步成功");
+    } else {
+      elements.testSyncBtn.textContent = "测试失败";
+      addDebugLog("测试同步失败", { error: response?.error });
+    }
+  } catch (error) {
+    addDebugLog("测试同步出错", { error: error.message });
+    elements.testSyncBtn.textContent = "测试错误";
+  }
+
+  setTimeout(() => {
+    elements.testSyncBtn.textContent = "测试同步";
+    elements.testSyncBtn.disabled = false;
+  }, 3000);
+}
+
+/**
  * 格式化时间
  */
 function formatTime(timestamp) {
@@ -434,19 +575,30 @@ chrome.runtime.onMessage.addListener((message) => {
  * 初始化
  */
 async function init() {
+  addDebugLog("Popup 初始化开始");
+
   // 加载数据
+  addDebugLog("加载统计数据");
   await loadStats();
+
+  addDebugLog("加载最近帖子");
   await loadRecentPosts();
+
+  addDebugLog("检查连接状态");
   await checkConnectionStatus();
 
-  // 绑定事件
+// 绑定事件
   elements.syncBtn.addEventListener("click", syncQueue);
+  elements.testSyncBtn.addEventListener("click", testSync);
   elements.settingsBtn.addEventListener("click", toggleSettings);
   elements.saveTokenBtn.addEventListener("click", saveToken);
   elements.fetchTeamsBtn.addEventListener("click", fetchTeams);
   elements.saveTeamBtn.addEventListener("click", saveTeam);
   elements.teamSelect.addEventListener("change", handleTeamSelectChange);
+  elements.toggleDebugBtn.addEventListener("click", toggleDebugPanel);
+  elements.clearDebugBtn.addEventListener("click", clearDebugLogs);
   elements.refreshConnectionBtn.addEventListener("click", async () => {
+    addDebugLog("手动刷新连接状态");
     elements.refreshConnectionBtn.textContent = "刷新中...";
     elements.refreshConnectionBtn.disabled = true;
     await checkConnectionStatus();
@@ -476,9 +628,85 @@ async function init() {
     loadRecentPosts();
   }, 10000); // 每 10 秒刷新
 
-  // 预填用户提供的团队 ID (用于测试)
+// 预填用户提供的团队 ID (用于测试)
   elements.teamIdInput.value = "2a88645c-b488-4f41-ab48-d48ef64bae46";
   console.log("Pre-filled team ID: 2a88645c-b488-4f41-ab48-d48ef64bae46");
+
+  // 加载调试信息
+  loadDebugInfo();
+}
+
+/**
+ * 添加调试日志
+ */
+function addDebugLog(message, data = null) {
+  const timestamp = new Date().toLocaleTimeString();
+  const logEntry = `[${timestamp}] ${message}${data ? `: ${JSON.stringify(data, null, 2)}` : ''}`;
+
+  debugLogs.unshift(logEntry);
+  // 只保留最近 50 条日志
+  if (debugLogs.length > 50) {
+    debugLogs = debugLogs.slice(0, 50);
+  }
+
+  updateDebugDisplay();
+}
+
+/**
+ * 更新调试显示
+ */
+function updateDebugDisplay() {
+  if (elements.debugContent) {
+    elements.debugContent.textContent = debugLogs.join('\n') || '等待调试信息...';
+    // 自动滚动到最新日志
+    elements.debugContent.scrollTop = 0;
+  }
+}
+
+/**
+ * 切换调试面板
+ */
+function toggleDebugPanel() {
+  const isVisible = elements.debugSection.style.display !== "none";
+
+  if (isVisible) {
+    elements.debugSection.style.display = "none";
+    elements.toggleDebugBtn.textContent = "调试";
+  } else {
+    elements.debugSection.style.display = "block";
+    elements.toggleDebugBtn.textContent = "关闭调试";
+    updateDebugDisplay();
+  }
+}
+
+/**
+ * 清除调试日志
+ */
+function clearDebugLogs() {
+  debugLogs = [];
+  updateDebugDisplay();
+}
+
+/**
+ * 加载调试信息
+ */
+async function loadDebugInfo() {
+  try {
+    addDebugLog("正在获取调试信息...");
+
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_DEBUG_INFO",
+    });
+
+    if (response) {
+      addDebugLog("获取调试信息成功", response);
+    } else {
+      addDebugLog("未获取到调试信息");
+    }
+  } catch (error) {
+    addDebugLog("获取调试信息失败", { error: error.message });
+    console.error("Error loading debug info:", error);
+  }
 }
 
 // 页面加载完成后初始化

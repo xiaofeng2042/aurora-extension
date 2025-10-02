@@ -61,6 +61,18 @@ async function handleNewLikedPost(tweetData) {
       // 通知 popup 更新
       notifyPopup({ type: "SYNC_SUCCESS", tweet: tweetData });
 
+      // 通知 content script 显示页面通知
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]) {
+          chrome.tabs.sendMessage(tabs[0].id, {
+            type: "SYNC_SUCCESS",
+            payload: { tweetId: tweetData.tweetId }
+          }).catch(() => {
+            // 忽略错误，页面可能未加载 Aurora
+          });
+        }
+      });
+
       syncState.isSync = false;
       syncState.currentTweet = null;
 
@@ -316,6 +328,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           success: false,
           error: error.message
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_DEBUG_INFO") {
+    // 获取调试信息
+    (async () => {
+      try {
+        const debugInfo = {
+          timestamp: new Date().toISOString(),
+          extensionId: chrome.runtime.id,
+          storage: {
+            linearToken: await Storage.getLinearToken() ? "已配置" : "未配置",
+            linearTeamId: await LinearAPI.getTeamId() || "未配置",
+            syncStats: await Storage.getSyncStats(),
+            queueSize: (await Storage.getSyncQueue()).length,
+            storageUsage: await Storage.getStorageUsage()
+          },
+          syncState: {
+            isSync: syncState.isSync,
+            currentTweet: syncState.currentTweet?.tweetId || null
+          }
+        };
+
+        sendResponse(debugInfo);
+      } catch (error) {
+        log("Error getting debug info:", error);
+        sendResponse({
+          error: error.message,
+          timestamp: new Date().toISOString()
         });
       }
     })();

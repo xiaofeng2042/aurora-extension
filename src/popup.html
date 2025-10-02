@@ -250,6 +250,7 @@
         <!-- 操作按钮 -->
         <div class="buttons">
             <button class="btn-primary" id="syncBtn">手动同步队列</button>
+            <button class="btn-secondary" id="testSyncBtn">测试同步</button>
             <button class="btn-secondary" id="settingsBtn">设置</button>
         </div>
 
@@ -296,6 +297,22 @@
                 <span>未连接到 Linear</span>
                 <button class="btn-secondary" id="refreshConnectionBtn" style="margin-left: auto; padding: 4px 8px; font-size: 0.75rem;">刷新</button>
             </div>
+        </div>
+
+        <!-- 调试面板(默认隐藏) -->
+        <div class="settings-section" id="debugSection" style="display: none; margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <div class="section-title">调试信息</div>
+                <button class="btn-secondary" id="clearDebugBtn" style="padding: 4px 8px; font-size: 0.75rem;">清除</button>
+            </div>
+            <div id="debugContent" style="font-family: monospace; font-size: 0.75rem; background: #f9fafb; padding: 8px; border-radius: 4px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; color: #4b5563;">
+                等待调试信息...
+            </div>
+        </div>
+
+        <!-- 调试切换按钮 -->
+        <div style="text-align: center; margin-top: 12px;">
+            <button class="btn-secondary" id="toggleDebugBtn" style="padding: 4px 8px; font-size: 0.75rem; width: auto;">调试</button>
         </div>
     </div>
 

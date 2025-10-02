@@ -76,11 +76,82 @@
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === "SYNC_STATUS_UPDATE") {
         log("Sync status update:", message.payload);
-        // 可以在这里显示页面通知
+        showPageNotification(message.payload);
+      }
+
+      if (message.type === "SYNC_SUCCESS") {
+        log("Sync success:", message.payload);
+        showPageNotification({
+          type: "success",
+          title: "同步成功",
+          message: `已将帖子同步到 Linear: ${message.payload?.tweetId || "未知"}`
+        });
+      }
+
+      if (message.type === "SYNC_ERROR") {
+        log("Sync error:", message.payload);
+        showPageNotification({
+          type: "error",
+          title: "同步失败",
+          message: message.payload?.error || "未知错误"
+        });
       }
 
       return false; // 同步响应
     });
+  }
+
+  /**
+   * 显示页面内通知
+   */
+  function showPageNotification(notification) {
+    try {
+      // 创建通知元素
+      const notificationEl = document.createElement("div");
+      notificationEl.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: ${notification.type === "success" ? "#10b981" : "#ef4444"};
+        color: white;
+        padding: 12px 16px;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 14px;
+        z-index: 10000;
+        max-width: 300px;
+        transform: translateX(100%);
+        transition: transform 0.3s ease;
+      `;
+
+      notificationEl.innerHTML = `
+        <div style="font-weight: 600; margin-bottom: 4px;">${notification.title}</div>
+        <div style="opacity: 0.9;">${notification.message}</div>
+      `;
+
+      // 添加到页面
+      document.body.appendChild(notificationEl);
+
+      // 动画显示
+      setTimeout(() => {
+        notificationEl.style.transform = "translateX(0)";
+      }, 100);
+
+      // 3 秒后自动消失
+      setTimeout(() => {
+        notificationEl.style.transform = "translateX(100%)";
+        setTimeout(() => {
+          if (notificationEl.parentNode) {
+            notificationEl.parentNode.removeChild(notificationEl);
+          }
+        }, 300);
+      }, 3000);
+
+      log("显示页面通知:", notification);
+    } catch (error) {
+      log("显示通知失败:", error);
+    }
   }
 
   /**
