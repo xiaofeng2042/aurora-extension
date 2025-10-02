@@ -410,12 +410,35 @@ const LinearAPI = {
       description += `**原链接:** [查看推文](${tweet.url})\n\n`;
     }
 
+    // 添加图片展示
     if (tweet.media?.images?.length > 0) {
-      description += `**图片:** ${tweet.media.images.length} 张\n\n`;
+      description += `**图片 (${tweet.media.images.length} 张):**\n\n`;
+      tweet.media.images.forEach((imageUrl, index) => {
+        if (imageUrl) {
+          // 确保图片 URL 是可访问的
+          let displayUrl = imageUrl;
+
+          // 如果是 X.com 图片，确保使用正确的格式
+          if (imageUrl.includes('pbs.twimg.com') || imageUrl.includes('twimg.com')) {
+            // 添加图片尺寸参数以获得更好的显示效果
+            if (!imageUrl.includes('name=')) {
+              displayUrl += '&name=large';
+            }
+          }
+
+          description += `![图片 ${index + 1}](${displayUrl})\n\n`;
+        }
+      });
     }
 
+    // 添加视频链接
     if (tweet.media?.videos?.length > 0) {
-      description += `**视频:** ${tweet.media.videos.length} 个\n\n`;
+      description += `**视频 (${tweet.media.videos.length} 个):**\n\n`;
+      tweet.media.videos.forEach((videoUrl, index) => {
+        if (videoUrl) {
+          description += `📹 [视频 ${index + 1}](${videoUrl})\n\n`;
+        }
+      });
     }
 
     description += `\n---\n*由 Aurora 扩展自动同步*`;

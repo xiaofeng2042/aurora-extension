@@ -122,7 +122,12 @@
       const imageSelectors = [
         'img[src*="media"]',
         'img[alt*="Image"]',
-        '[data-testid="tweetPhoto"] img'
+        '[data-testid="tweetPhoto"] img',
+        'img[data-testid="tweetImage"]',
+        'img[src*="pbs.twimg.com"]',
+        'img[src*="twimg.com"]',
+        '[aria-label*="图片"] img',
+        '[aria-label*="Image"] img'
       ];
 
       const videoSelectors = [
@@ -138,8 +143,45 @@
       for (const selector of imageSelectors) {
         const imgElements = tweetElement.querySelectorAll(selector);
         if (imgElements.length > 0) {
-          images = Array.from(imgElements).map(img => img.src).filter(Boolean);
-          log(`找到 ${images.length} 张图片`);
+          images = Array.from(imgElements).map(img => {
+            // 获取最高质量的图片 URL
+            let imageUrl = img.src || img.getAttribute('data-src') || img.getAttribute('srcset')?.split(' ').pop();
+
+            if (!imageUrl) return null;
+
+            // 过滤掉头像、emoji 等非内容图片
+            // 只保留推文内容中的图片
+            if (imageUrl.includes('/profile_images/') ||
+                imageUrl.includes('/emoji/') ||
+                imageUrl.includes('/card_img/') ||
+                imageUrl.includes('/ext_tw_video_thumb/')) {
+              return null;
+            }
+
+            // 如果是 X.com 的缩略图 URL，尝试获取原图
+            if (imageUrl.includes('/media/')) {
+              // 将缩略图 URL 转换为原图 URL
+              imageUrl = imageUrl.replace(/&name=.*$/, '&name=large');
+              // 如果没有 name 参数，添加一个
+              if (!imageUrl.includes('name=')) {
+                imageUrl += (imageUrl.includes('?') ? '&' : '?') + 'name=large';
+              }
+
+              // 确保使用 HTTPS
+              if (imageUrl.startsWith('//')) {
+                imageUrl = 'https:' + imageUrl;
+              }
+            }
+
+            return imageUrl;
+          }).filter(Boolean);
+
+          // 去重
+          images = [...new Set(images)];
+
+          log(`找到 ${images.length} 张图片`, {
+            firstImage: images[0] ? images[0].substring(0, 100) + '...' : 'none'
+          });
           break;
         }
       }
@@ -174,7 +216,10 @@
       log(`成功提取贴文数据: ${tweetId}`, {
         author: tweetData.author.name,
         textLength: tweetData.text.length,
-        mediaCount: tweetData.media.images.length + tweetData.media.videos.length
+        imageCount: tweetData.media.images.length,
+        videoCount: tweetData.media.videos.length,
+        images: tweetData.media.images.slice(0, 2), // 只显示前2个图片URL用于调试
+        videos: tweetData.media.videos.slice(0, 2)   // 只显示前2个视频URL用于调试
       });
 
       return tweetData;

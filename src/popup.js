@@ -27,6 +27,7 @@ const elements = {
   toggleDebugBtn: document.getElementById("toggleDebugBtn"),
   clearDebugBtn: document.getElementById("clearDebugBtn"),
   testSyncBtn: document.getElementById("testSyncBtn"),
+  checkImagesBtn: document.getElementById("checkImagesBtn"),
 };
 
 // 调试日志存储
@@ -465,6 +466,89 @@ function handleTeamSelectChange() {
 }
 
 /**
+ * 检查页面图片
+ */
+async function checkImages() {
+  elements.checkImagesBtn.textContent = "检查中...";
+  elements.checkImagesBtn.disabled = true;
+
+  try {
+    addDebugLog("开始检查页面图片");
+
+    // 获取当前活动的标签页
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    if (!tab || !tab.url?.includes('x.com') && !tab.url?.includes('twitter.com')) {
+      addDebugLog("当前页面不是 X.com", { url: tab?.url });
+      alert("请在 X.com 页面使用此功能");
+      elements.checkImagesBtn.textContent = "检查图片";
+      elements.checkImagesBtn.disabled = false;
+      return;
+    }
+
+    addDebugLog("向页面注入检查脚本");
+
+    // 注入脚本检查页面图片
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const imageSelectors = [
+          'img[src*="media"]',
+          'img[alt*="Image"]',
+          '[data-testid="tweetPhoto"] img',
+          'img[data-testid="tweetImage"]',
+          'img[src*="pbs.twimg.com"]',
+          'img[src*="twimg.com"]',
+          '[aria-label*="图片"] img',
+          '[aria-label*="Image"] img'
+        ];
+
+        const allImages = [];
+        const tweetImages = [];
+
+        imageSelectors.forEach(selector => {
+          const imgs = document.querySelectorAll(selector);
+          imgs.forEach(img => {
+            const src = img.src;
+            if (src && src.includes('/media/')) {
+              tweetImages.push(src);
+            }
+            if (src) {
+              allImages.push(src);
+            }
+          });
+        });
+
+        return {
+          totalImages: allImages.length,
+          uniqueImages: [...new Set(allImages)].length,
+          tweetImages: [...new Set(tweetImages)],
+          tweetImageCount: [...new Set(tweetImages)].length
+        };
+      }
+    });
+
+    const imageData = result[0]?.result;
+
+    if (imageData) {
+      addDebugLog("图片检查结果", imageData);
+      alert(`页面图片统计：\n\n` +
+        `总图片数: ${imageData.totalImages}\n` +
+        `去重后: ${imageData.uniqueImages}\n` +
+        `推文图片: ${imageData.tweetImageCount}\n\n` +
+        `前3个推文图片URL:\n${imageData.tweetImages.slice(0, 3).join('\n')}`
+      );
+    }
+  } catch (error) {
+    addDebugLog("检查图片失败", { error: error.message });
+    alert(`检查失败: ${error.message}`);
+  }
+
+  elements.checkImagesBtn.textContent = "检查图片";
+  elements.checkImagesBtn.disabled = false;
+}
+
+/**
  * 测试同步功能
  */
 async function testSync() {
@@ -481,12 +565,17 @@ async function testSync() {
         name: "测试用户",
         handle: "test_user"
       },
-      text: "这是一个测试推文，用于验证 Aurora 扩展的同步功能是否正常工作。",
+      text: "这是一个测试推文，用于验证 Aurora 扩展的同步功能是否正常工作。\n\n包含图片和媒体内容测试。",
       timestamp: new Date().toISOString(),
       url: "https://x.com/test_user/status/" + Date.now(),
       media: {
-        images: [],
-        videos: []
+        images: [
+          "https://pbs.twimg.com/media/test_image.jpg?format=jpg&name=large",
+          "https://pbs.twimg.com/media/test_image2.jpg?format=jpg&name=large"
+        ],
+        videos: [
+          "https://video.twimg.com/ext_tw_video/test_video.mp4"
+        ]
       }
     };
 
@@ -590,6 +679,7 @@ async function init() {
 // 绑定事件
   elements.syncBtn.addEventListener("click", syncQueue);
   elements.testSyncBtn.addEventListener("click", testSync);
+  elements.checkImagesBtn.addEventListener("click", checkImages);
   elements.settingsBtn.addEventListener("click", toggleSettings);
   elements.saveTokenBtn.addEventListener("click", saveToken);
   elements.fetchTeamsBtn.addEventListener("click", fetchTeams);
