@@ -12,6 +12,58 @@
   }
 
   /**
+   * 检查扩展运行时上下文是否有效
+   */
+  function isRuntimeValid() {
+    try {
+      return chrome?.runtime?.id !== undefined;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * 延迟函数
+   */
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 安全地发送消息到背景脚本，带重试机制
+   */
+  async function sendMessageSafely(message, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+      // 检查运行时上下文是否有效
+      if (!isRuntimeValid()) {
+        log(`Extension context invalid, retry attempt ${i + 1}/${retries}`);
+
+        if (i < retries - 1) {
+          // 指数退避等待
+          await sleep(1000 * Math.pow(2, i));
+          continue;
+        }
+
+        throw new Error("Extension context invalidated - please reload the page");
+      }
+
+      try {
+        const response = await chrome.runtime.sendMessage(message);
+        return response;
+      } catch (error) {
+        if (error.message.includes("Extension context invalidated") && i < retries - 1) {
+          log(`Context invalidated, waiting before retry ${i + 1}/${retries}`);
+          await sleep(1000 * Math.pow(2, i));
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error("Failed to send message after retries");
+  }
+
+  /**
    * 从贴文 DOM 元素中提取数据
    */
   function extractTweetData(tweetElement) {
@@ -396,11 +448,60 @@
   }
 
   /**
+   * 检查是否应该扫描历史点赞
+   */
+  async function shouldScanHistoricalLikes() {
+    try {
+      // 先检查运行时上下文是否有效
+      if (!isRuntimeValid()) {
+        log("扩展运行时上下文无效，跳过历史扫描");
+        return false;
+      }
+
+      // 检查配置是否允许扫描历史点赞
+      const response = await sendMessageSafely({
+        type: "GET_CONFIG",
+      }, 2); // 减少重试次数，避免延迟
+
+      if (!response || response.syncHistoricalLikes === false) {
+        log("历史点赞扫描已禁用，跳过扫描");
+        return false;
+      }
+
+      log("历史点赞扫描已启用");
+      return true;
+    } catch (error) {
+      if (error.message.includes("Extension context invalidated")) {
+        log("扩展上下文已失效，跳过历史扫描");
+      } else {
+        log("检查历史点赞配置失败:", error);
+      }
+      // 出错时默认不扫描，避免意外同步历史点赞
+      return false;
+    }
+  }
+
+  /**
    * Fallback: 定期扫描页面上已点赞的贴文
    * 用于捕获页面加载时已存在的点赞贴文
+   * 现在受配置控制，默认禁用以避免同步历史点赞
+   * 增加了批处理和延迟，避免大量并发调用导致上下文失效
    */
-  function scanExistingLikes() {
+  async function scanExistingLikes() {
     log("开始扫描现有点赞贴文");
+
+    // 检查是否应该扫描历史点赞
+    const shouldScan = await shouldScanHistoricalLikes();
+    if (!shouldScan) {
+      log("配置不允许扫描历史点赞，跳过");
+      return;
+    }
+
+    // 检查运行时上下文是否有效
+    if (!isRuntimeValid()) {
+      log("扩展运行时上下文无效，跳过历史扫描");
+      return;
+    }
 
     // 更新选择器以适应 X.com 当前结构
     const unlikeButtonSelectors = [
@@ -409,6 +510,8 @@
       'div[role="button"][data-testid="unlike"]'
     ];
 
+    // 收集所有需要处理的推文数据
+    const allTweetData = [];
     let totalScanned = 0;
 
     unlikeButtonSelectors.forEach(selector => {
@@ -428,7 +531,7 @@
           if (tweetElement) {
             const tweetData = extractTweetData(tweetElement);
             if (tweetData) {
-              sendTweetData(tweetData);
+              allTweetData.push(tweetData);
             }
             break; // 找到容器后停止尝试其他选择器
           }
@@ -437,7 +540,113 @@
       });
     });
 
-    log(`扫描完成，总共处理了 ${totalScanned} 个点赞按钮`);
+    if (allTweetData.length === 0) {
+      log("未找到可处理的推文数据");
+      return;
+    }
+
+    log(`准备批量处理 ${allTweetData.length} 个推文`);
+
+    // 批处理：每5个推文一组，组间延迟2秒
+    const BATCH_SIZE = 5;
+    const BATCH_DELAY = 2000; // 2秒
+    let syncableCount = 0;
+    let historicalCount = 0;
+
+    for (let i = 0; i < allTweetData.length; i += BATCH_SIZE) {
+      const batch = allTweetData.slice(i, i + BATCH_SIZE);
+      const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(allTweetData.length / BATCH_SIZE);
+
+      log(`处理第 ${batchNumber}/${totalBatches} 批次，包含 ${batch.length} 个推文`);
+
+      // 处理当前批次
+      for (const tweetData of batch) {
+        try {
+          // 在每个批次处理前检查运行时上下文
+          if (!isRuntimeValid()) {
+            log("扩展运行时上下文失效，停止批处理");
+            return;
+          }
+
+          // 检查是否为历史推文
+          const response = await sendMessageSafely({
+            type: "CHECK_HISTORICAL_TWEET",
+            payload: {
+              tweetData: tweetData,
+              timestamp: tweetData.timestamp
+            }
+          }, 2); // 减少重试次数，避免延迟
+
+          if (response && response.shouldSync) {
+            log(`历史推文可同步: ${tweetData.tweetId}`);
+            sendTweetData(tweetData);
+            syncableCount++;
+          } else if (response && response.isHistorical) {
+            log(`跳过历史推文: ${tweetData.tweetId} (安装前发布)`);
+            historicalCount++;
+          } else {
+            log(`检查历史推文失败: ${tweetData.tweetId}`);
+          }
+
+          // 批次内每个推文之间添加小延迟，避免过于频繁
+          await sleep(500);
+
+        } catch (error) {
+          if (error.message.includes("Extension context invalidated")) {
+            log("扩展上下文已失效，停止批处理");
+            return;
+          } else {
+            log("处理推文时出错:", error);
+          }
+        }
+      }
+
+      // 如果不是最后一批，添加批间延迟
+      if (i + BATCH_SIZE < allTweetData.length) {
+        log(`批次 ${batchNumber} 完成，等待 ${BATCH_DELAY}ms 处理下一批次`);
+        await sleep(BATCH_DELAY);
+      }
+    }
+
+    log(`扫描完成，总共扫描了 ${totalScanned} 个点赞按钮，可同步 ${syncableCount} 个，跳过历史 ${historicalCount} 个`);
+  }
+
+  /**
+   * 检查并发送历史推文
+   */
+  async function checkAndSendHistoricalTweet(tweetData) {
+    try {
+      // 先检查运行时上下文是否有效
+      if (!isRuntimeValid()) {
+        log("扩展运行时上下文无效，跳过历史推文检查");
+        return;
+      }
+
+      // 检查是否为历史推文
+      const response = await sendMessageSafely({
+        type: "CHECK_HISTORICAL_TWEET",
+        payload: {
+          tweetData: tweetData,
+          timestamp: tweetData.timestamp
+        }
+      }, 2); // 减少重试次数，避免延迟
+
+      if (response && response.shouldSync) {
+        log(`历史推文可同步: ${tweetData.tweetId}`);
+        sendTweetData(tweetData);
+      } else if (response && response.isHistorical) {
+        log(`跳过历史推文: ${tweetData.tweetId} (安装前发布)`);
+      } else {
+        log(`检查历史推文失败: ${tweetData.tweetId}`);
+      }
+    } catch (error) {
+      if (error.message.includes("Extension context invalidated")) {
+        log("扩展上下文已失效，跳过历史推文检查");
+      } else {
+        log("检查历史推文时出错:", error);
+      }
+    }
   }
 
   /**

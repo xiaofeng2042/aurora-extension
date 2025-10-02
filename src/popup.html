@@ -298,6 +298,23 @@
                 <span>未连接到 Linear</span>
                 <button class="btn-secondary" id="refreshConnectionBtn" style="margin-left: auto; padding: 4px 8px; font-size: 0.75rem;">刷新</button>
             </div>
+
+            <div class="section-title" style="margin-top: 16px;">同步设置</div>
+            <div style="display: flex; align-items: center; justify-content: space-between; margin: 8px 0;">
+                <label style="font-size: 0.875rem; color: #374151; cursor: pointer;">
+                    <input type="checkbox" id="syncHistoricalLikes" style="margin-right: 8px;">
+                    同步历史点赞（扩展安装前的点赞）
+                </label>
+                <span style="font-size: 0.7rem; color: #9ca3af;" id="historicalLikesStatus">已禁用</span>
+            </div>
+            <div style="font-size: 0.7rem; color: #6b7280; margin: 4px 0 8px 0;">
+                ⚠️ 启用后会尝试同步您过去在 X.com 上点赞的所有帖子
+            </div>
+
+            <div style="display: flex; gap: 8px; margin-top: 12px;">
+                <button class="btn-secondary" id="syncCurrentPageBtn" style="flex: 1;">同步当前页面</button>
+                <button class="btn-secondary" id="clearHistoryBtn" style="flex: 1;">清除同步记录</button>
+            </div>
         </div>
 
         <!-- 调试面板(默认隐藏) -->

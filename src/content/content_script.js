@@ -10,6 +10,58 @@
   }
 
   /**
+   * 检查扩展运行时上下文是否有效
+   */
+  function isRuntimeValid() {
+    try {
+      return chrome?.runtime?.id !== undefined;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * 延迟函数
+   */
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 安全地发送消息到背景脚本，带重试机制
+   */
+  async function sendMessageSafely(message, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+      // 检查运行时上下文是否有效
+      if (!isRuntimeValid()) {
+        log(`Extension context invalid, retry attempt ${i + 1}/${retries}`);
+
+        if (i < retries - 1) {
+          // 指数退避等待
+          await sleep(1000 * Math.pow(2, i));
+          continue;
+        }
+
+        throw new Error("Extension context invalidated - please reload the page");
+      }
+
+      try {
+        const response = await chrome.runtime.sendMessage(message);
+        return response;
+      } catch (error) {
+        if (error.message.includes("Extension context invalidated") && i < retries - 1) {
+          log(`Context invalidated, waiting before retry ${i + 1}/${retries}`);
+          await sleep(1000 * Math.pow(2, i));
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error("Failed to send message after retries");
+  }
+
+  /**
    * 注入 page_script.js 到页面环境
    * 这样脚本才能访问页面的 JavaScript 环境和 React 组件
    */
@@ -48,11 +100,10 @@
         log("Received liked post from page script:", tweetData.tweetId);
 
         // 转发到后台服务
-        chrome.runtime
-          .sendMessage({
-            type: "NEW_LIKED_POST",
-            payload: tweetData,
-          })
+        sendMessageSafely({
+          type: "NEW_LIKED_POST",
+          payload: tweetData,
+        })
           .then((response) => {
             if (response?.success) {
               log("Post sent to background successfully");
@@ -61,7 +112,46 @@
             }
           })
           .catch((error) => {
-            console.error("[Aurora] Error sending to background:", error);
+            if (error.message.includes("Extension context invalidated")) {
+              // 显示用户友好的错误提示
+              console.error("[Aurora] 扩展上下文已失效，请刷新页面以恢复功能");
+
+              // 尝试在页面上显示提示
+              try {
+                const notification = document.createElement('div');
+                notification.style.cssText = `
+                  position: fixed;
+                  top: 20px;
+                  right: 20px;
+                  background: #f87171;
+                  color: white;
+                  padding: 12px 16px;
+                  border-radius: 8px;
+                  font-size: 14px;
+                  font-family: system-ui, -apple-system, sans-serif;
+                  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                  z-index: 10000;
+                  max-width: 300px;
+                `;
+                notification.innerHTML = `
+                  <div style="font-weight: bold; margin-bottom: 4px;">Aurora 扩展需要重新加载</div>
+                  <div style="font-size: 12px;">扩展已更新，请刷新此页面以恢复功能</div>
+                `;
+                document.body.appendChild(notification);
+
+                // 5秒后自动移除提示
+                setTimeout(() => {
+                  if (notification.parentNode) {
+                    notification.parentNode.removeChild(notification);
+                  }
+                }, 5000);
+              } catch (e) {
+                // 如果无法添加通知到页面，至少记录错误
+                console.warn("[Aurora] Could not display notification:", e);
+              }
+            } else {
+              console.error("[Aurora] Error sending to background:", error);
+            }
           });
       }
     });

@@ -12,6 +12,9 @@ const Storage = {
     LINEAR_TEAM_ID: "linearTeamId", // Linear 团队 ID
     RECENT_POSTS: "recentPosts", // 最近同步的帖子(用于显示)
     SYNC_QUEUE: "syncQueue", // 待同步队列(失败重试用)
+    INSTALL_TIMESTAMP: "installTimestamp", // 扩展安装时间戳
+    SYNC_HISTORICAL_LIKES: "syncHistoricalLikes", // 是否同步历史点赞
+    CONFIG: "auroraConfig", // 扩展配置
   },
 
   /**
@@ -271,6 +274,158 @@ const Storage = {
       console.error("[Storage] Error getting storage usage:", error);
       return null;
     }
+  },
+
+  // === 配置管理 ===
+
+  /**
+   * 获取扩展配置
+   */
+  async getConfig() {
+    const config = await this.get(this.KEYS.CONFIG);
+    return {
+      // 默认配置
+      syncHistoricalLikes: false,
+      maxSyncedTweetsCache: 1000,
+      cleanupDays: 30,
+      enableNotifications: true,
+      ...config
+    };
+  },
+
+  /**
+   * 设置扩展配置
+   */
+  async setConfig(config) {
+    const currentConfig = await this.getConfig();
+    const newConfig = { ...currentConfig, ...config };
+    return await this.set(this.KEYS.CONFIG, newConfig);
+  },
+
+  /**
+   * 获取安装时间戳
+   */
+  async getInstallTimestamp() {
+    let timestamp = await this.get(this.KEYS.INSTALL_TIMESTAMP);
+    if (!timestamp) {
+      timestamp = Date.now();
+      await this.set(this.KEYS.INSTALL_TIMESTAMP, timestamp);
+      console.log("[Storage] Set install timestamp:", timestamp);
+    }
+    return timestamp;
+  },
+
+  /**
+   * 检查是否应该同步历史点赞
+   */
+  async shouldSyncHistoricalLikes() {
+    const config = await this.getConfig();
+    return config.syncHistoricalLikes === true;
+  },
+
+  /**
+   * 检查推文是否为历史推文（在安装前点赞的）
+   */
+  async isHistoricalTweet(tweetTimestamp) {
+    const installTimestamp = await this.getInstallTimestamp();
+    return new Date(tweetTimestamp).getTime() < installTimestamp;
+  },
+
+  /**
+   * 清理旧的同步记录（LRU策略）
+   */
+  async cleanupSyncedTweets() {
+    const config = await this.getConfig();
+    const syncedTweets = (await this.get(this.KEYS.SYNCED_TWEETS)) || [];
+
+    // 如果记录数量少于限制，不需要清理
+    if (syncedTweets.length <= config.maxSyncedTweetsCache) {
+      return;
+    }
+
+    // 获取最近同步的帖子列表，按同步时间排序
+    const recentPosts = (await this.get(this.KEYS.RECENT_POSTS)) || [];
+
+    // 保留最近同步的推文ID
+    const recentTweetIds = recentPosts
+      .sort((a, b) => new Date(b.syncedAt) - new Date(a.syncedAt))
+      .slice(0, config.maxSyncedTweetsCache)
+      .map(post => post.tweetId);
+
+    // 过滤掉不在最近列表中的推文
+    const filteredSyncedTweets = syncedTweets.filter(id => recentTweetIds.includes(id));
+
+    await this.set(this.KEYS.SYNCED_TWEETS, filteredSyncedTweets);
+    console.log(`[Storage] Cleaned up synced tweets: ${syncedTweets.length} -> ${filteredSyncedTweets.length}`);
+  },
+
+  /**
+   * 清除所有同步记录
+   */
+  async clearSyncHistory() {
+    await Promise.all([
+      this.remove(this.KEYS.SYNCED_TWEETS),
+      this.remove(this.KEYS.RECENT_POSTS),
+      this.remove(this.KEYS.SYNC_QUEUE),
+      this.remove(this.KEYS.SYNC_STATS),
+      this.remove(this.KEYS.INSTALL_TIMESTAMP)
+    ]);
+
+    // 重新设置安装时间戳
+    await this.getInstallTimestamp();
+    console.log("[Storage] Sync history cleared");
+  },
+
+  /**
+   * 检查扩展运行时上下文是否有效
+   */
+  isRuntimeValid() {
+    try {
+      return chrome?.runtime?.id !== undefined;
+    } catch (error) {
+      return false;
+    }
+  },
+
+  /**
+   * 安全地发送消息到背景脚本，带重试机制
+   */
+  async sendMessageSafely(message, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+      // 检查运行时上下文是否有效
+      if (!this.isRuntimeValid()) {
+        console.warn(`[Storage] Extension context invalid, retry attempt ${i + 1}/${retries}`);
+
+        if (i < retries - 1) {
+          // 指数退避等待
+          await this.sleep(1000 * Math.pow(2, i));
+          continue;
+        }
+
+        throw new Error("Extension context invalidated - please reload the page");
+      }
+
+      try {
+        const response = await chrome.runtime.sendMessage(message);
+        return response;
+      } catch (error) {
+        if (error.message.includes("Extension context invalidated") && i < retries - 1) {
+          console.warn(`[Storage] Context invalidated, waiting before retry ${i + 1}/${retries}`);
+          await this.sleep(1000 * Math.pow(2, i));
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error("Failed to send message after retries");
+  },
+
+  /**
+   * 延迟函数
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   },
 };
 

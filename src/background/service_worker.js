@@ -338,6 +338,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // 获取调试信息
     (async () => {
       try {
+        const config = await Storage.getConfig();
+        const installTimestamp = await Storage.getInstallTimestamp();
+
         const debugInfo = {
           timestamp: new Date().toISOString(),
           extensionId: chrome.runtime.id,
@@ -346,8 +349,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             linearTeamId: await LinearAPI.getTeamId() || "未配置",
             syncStats: await Storage.getSyncStats(),
             queueSize: (await Storage.getSyncQueue()).length,
-            storageUsage: await Storage.getStorageUsage()
+            storageUsage: await Storage.getStorageUsage(),
+            syncedTweetsCount: ((await Storage.get(Storage.KEYS.SYNCED_TWEETS)) || []).length
           },
+          config: config,
+          installTimestamp: installTimestamp,
           syncState: {
             isSync: syncState.isSync,
             currentTweet: syncState.currentTweet?.tweetId || null
@@ -361,6 +367,75 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: error.message,
           timestamp: new Date().toISOString()
         });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_CONFIG") {
+    // 获取扩展配置
+    (async () => {
+      try {
+        const config = await Storage.getConfig();
+        sendResponse(config);
+      } catch (error) {
+        log("Error getting config:", error);
+        sendResponse({ error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "SET_CONFIG") {
+    // 设置扩展配置
+    (async () => {
+      try {
+        await Storage.setConfig(message.config);
+        const newConfig = await Storage.getConfig();
+        log("Config updated:", newConfig);
+        sendResponse({ success: true, config: newConfig });
+      } catch (error) {
+        log("Error setting config:", error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "CHECK_HISTORICAL_TWEET") {
+    // 检查是否为历史推文
+    (async () => {
+      try {
+        const { timestamp } = message.payload;
+        const isHistorical = await Storage.isHistoricalTweet(timestamp);
+        const shouldSyncHistorical = await Storage.shouldSyncHistoricalLikes();
+
+        sendResponse({
+          isHistorical,
+          shouldSync: !isHistorical || shouldSyncHistorical
+        });
+      } catch (error) {
+        log("Error checking historical tweet:", error);
+        sendResponse({
+          isHistorical: false,
+          shouldSync: false,
+          error: error.message
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "CLEAR_SYNC_HISTORY") {
+    // 清除同步历史
+    (async () => {
+      try {
+        await Storage.clearSyncHistory();
+        log("Sync history cleared");
+        sendResponse({ success: true });
+      } catch (error) {
+        log("Error clearing sync history:", error);
+        sendResponse({ success: false, error: error.message });
       }
     })();
     return true;

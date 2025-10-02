@@ -2,6 +2,58 @@
  * Popup UI 脚本
  */
 
+/**
+ * 检查扩展运行时上下文是否有效
+ */
+function isRuntimeValid() {
+  try {
+    return chrome?.runtime?.id !== undefined;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * 延迟函数
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * 安全地发送消息到背景脚本，带重试机制
+ */
+async function sendMessageSafely(message, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    // 检查运行时上下文是否有效
+    if (!isRuntimeValid()) {
+      console.warn(`[Popup] Extension context invalid, retry attempt ${i + 1}/${retries}`);
+
+      if (i < retries - 1) {
+        // 指数退避等待
+        await sleep(1000 * Math.pow(2, i));
+        continue;
+      }
+
+      throw new Error("Extension context invalidated - please reload the extension");
+    }
+
+    try {
+      const response = await chrome.runtime.sendMessage(message);
+      return response;
+    } catch (error) {
+      if (error.message.includes("Extension context invalidated") && i < retries - 1) {
+        console.warn(`[Popup] Context invalidated, waiting before retry ${i + 1}/${retries}`);
+        await sleep(1000 * Math.pow(2, i));
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("Failed to send message after retries");
+}
+
 // DOM 元素
 const elements = {
   statusBadge: document.getElementById("statusBadge"),
@@ -28,6 +80,10 @@ const elements = {
   clearDebugBtn: document.getElementById("clearDebugBtn"),
   testSyncBtn: document.getElementById("testSyncBtn"),
   checkImagesBtn: document.getElementById("checkImagesBtn"),
+  syncHistoricalLikes: document.getElementById("syncHistoricalLikes"),
+  historicalLikesStatus: document.getElementById("historicalLikesStatus"),
+  syncCurrentPageBtn: document.getElementById("syncCurrentPageBtn"),
+  clearHistoryBtn: document.getElementById("clearHistoryBtn"),
 };
 
 // 调试日志存储
@@ -38,7 +94,7 @@ let debugLogs = [];
  */
 async function loadStats() {
   try {
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendMessageSafely({
       type: "GET_SYNC_STATS",
     });
 
@@ -47,7 +103,14 @@ async function loadStats() {
       elements.totalCount.textContent = response.totalSynced || 0;
     }
   } catch (error) {
-    console.error("Error loading stats:", error);
+    if (error.message.includes("Extension context invalidated")) {
+      addDebugLog("扩展上下文已失效，请重新加载扩展", { error: error.message });
+      // 显示用户友好的错误信息
+      elements.statusBadge.textContent = "扩展错误";
+      elements.statusBadge.style.color = "#ef4444";
+    } else {
+      console.error("Error loading stats:", error);
+    }
   }
 }
 
@@ -329,8 +392,9 @@ function toggleSettings() {
     elements.settingsSection.style.display = "block";
     elements.settingsBtn.textContent = "关闭设置";
 
-    // 加载团队信息
+    // 加载团队信息和配置
     loadTeamInfo();
+    loadConfig();
   }
 }
 
@@ -354,6 +418,170 @@ async function loadTeamInfo() {
     console.error("Error loading team info:", error);
     elements.currentTeamInfo.style.display = "none";
   }
+}
+
+/**
+ * 加载配置设置
+ */
+async function loadConfig() {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_CONFIG",
+    });
+
+    if (response) {
+      // 设置历史点赞开关状态
+      elements.syncHistoricalLikes.checked = response.syncHistoricalLikes === true;
+      updateHistoricalLikesStatus(response.syncHistoricalLikes);
+
+      addDebugLog("配置加载成功", response);
+    }
+  } catch (error) {
+    addDebugLog("加载配置失败", { error: error.message });
+  }
+}
+
+/**
+ * 更新历史点赞状态显示
+ */
+function updateHistoricalLikesStatus(enabled) {
+  if (enabled) {
+    elements.historicalLikesStatus.textContent = "已启用";
+    elements.historicalLikesStatus.style.color = "#10b981";
+  } else {
+    elements.historicalLikesStatus.textContent = "已禁用";
+    elements.historicalLikesStatus.style.color = "#9ca3af";
+  }
+}
+
+/**
+ * 保存历史点赞设置
+ */
+async function saveHistoricalLikesSetting() {
+  const enabled = elements.syncHistoricalLikes.checked;
+
+  try {
+    addDebugLog("保存历史点赞设置", { enabled });
+
+    const response = await chrome.runtime.sendMessage({
+      type: "SET_CONFIG",
+      config: {
+        syncHistoricalLikes: enabled
+      }
+    });
+
+    if (response?.success) {
+      updateHistoricalLikesStatus(enabled);
+      addDebugLog("历史点赞设置保存成功");
+    } else {
+      addDebugLog("历史点赞设置保存失败", response);
+      // 回滚状态
+      elements.syncHistoricalLikes.checked = !enabled;
+    }
+  } catch (error) {
+    addDebugLog("保存历史点赞设置出错", { error: error.message });
+    // 回滚状态
+    elements.syncHistoricalLikes.checked = !enabled;
+  }
+}
+
+/**
+ * 同步当前页面
+ */
+async function syncCurrentPage() {
+  elements.syncCurrentPageBtn.textContent = "同步中...";
+  elements.syncCurrentPageBtn.disabled = true;
+
+  try {
+    // 先检查运行时上下文是否有效
+    if (!isRuntimeValid()) {
+      throw new Error("扩展上下文已失效，请重新加载扩展");
+    }
+
+    addDebugLog("开始同步当前页面");
+
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    if (!tab || !tab.url?.includes('x.com') && !tab.url?.includes('twitter.com')) {
+      addDebugLog("当前页面不是 X.com", { url: tab?.url });
+      alert("请在 X.com 页面使用此功能");
+      return;
+    }
+
+    // 注入脚本强制扫描当前页面的点赞
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        // 触发页面脚本中的历史点赞扫描
+        if (window.auroraPageScript && window.auroraPageScript.scanExistingLikes) {
+          window.auroraPageScript.scanExistingLikes();
+          return { success: true };
+        }
+        return { success: false, error: "Aurora page script not loaded" };
+      }
+    });
+
+    elements.syncCurrentPageBtn.textContent = "同步完成 ✓";
+    addDebugLog("当前页面同步触发成功");
+
+  } catch (error) {
+    if (error.message.includes("Extension context invalidated")) {
+      addDebugLog("扩展上下文已失效", { error: error.message });
+      alert("扩展需要重新加载，请刷新页面后重试");
+    } else {
+      addDebugLog("同步当前页面失败", { error: error.message });
+      alert(`同步失败: ${error.message}`);
+    }
+  }
+
+  setTimeout(() => {
+    elements.syncCurrentPageBtn.textContent = "同步当前页面";
+    elements.syncCurrentPageBtn.disabled = false;
+  }, 2000);
+}
+
+/**
+ * 清除同步记录
+ */
+async function clearSyncHistory() {
+  if (!confirm("确定要清除所有同步记录吗？这将删除已同步的推文记录，但不会删除 Linear 中已创建的 Issue。")) {
+    return;
+  }
+
+  elements.clearHistoryBtn.textContent = "清除中...";
+  elements.clearHistoryBtn.disabled = true;
+
+  try {
+    // 先检查运行时上下文是否有效
+    if (!isRuntimeValid()) {
+      throw new Error("扩展上下文已失效，请重新加载扩展");
+    }
+
+    addDebugLog("开始清除同步记录");
+
+    const response = await sendMessageSafely({
+      type: "CLEAR_SYNC_HISTORY"
+    });
+
+    if (response?.success) {
+      addDebugLog("同步记录清除成功");
+
+      // 刷新显示
+      await loadStats();
+      await loadRecentPosts();
+
+      alert("同步记录已清除");
+    } else {
+      addDebugLog("同步记录清除失败", response);
+      alert(`清除失败: ${response?.error || "未知错误"}`);
+    }
+  } catch (error) {
+    addDebugLog("清除同步记录出错", { error: error.message });
+    alert(`清除失败: ${error.message}`);
+  }
+
+  elements.clearHistoryBtn.textContent = "清除同步记录";
+  elements.clearHistoryBtn.disabled = false;
 }
 
 /**
@@ -697,6 +925,9 @@ async function init() {
       elements.refreshConnectionBtn.disabled = false;
     }, 1000);
   });
+  elements.syncHistoricalLikes.addEventListener("change", saveHistoricalLikesSetting);
+  elements.syncCurrentPageBtn.addEventListener("click", syncCurrentPage);
+  elements.clearHistoryBtn.addEventListener("click", clearSyncHistory);
 
   // Token 输入框回车保存
   elements.tokenInput.addEventListener("keypress", (e) => {
