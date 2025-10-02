@@ -1,14 +1,49 @@
 {
     "manifest_version": 3,
     "name": "Aurora",
-    "description": "Aurora brings a focused new-tab experience with quick access to tasks and bookmarks.",
+    "description": "Sync your X.com liked posts to Linear issues automatically.",
     "version": "0.1.0",
     "action": {
         "default_popup": "popup.html",
         "default_title": "Aurora"
     },
-    "permissions": [],
-    "host_permissions": [],
+    "permissions": [
+        "storage",
+        "scripting",
+        "alarms"
+    ],
+    "host_permissions": [
+        "https://twitter.com/*",
+        "https://x.com/*",
+        "https://linear.app/*",
+        "https://api.linear.app/*"
+    ],
+    "background": {
+        "service_worker": "background/service_worker.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://twitter.com/*",
+                "https://x.com/*"
+            ],
+            "js": [
+                "content/content_script.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "page/page_script.js"
+            ],
+            "matches": [
+                "https://twitter.com/*",
+                "https://x.com/*"
+            ]
+        }
+    ],
     "icons": {
         "16": "assets/icons/icon16.png",
         "48": "assets/icons/icon48.png",
