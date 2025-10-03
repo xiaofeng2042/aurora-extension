@@ -369,12 +369,18 @@ const LinearAPI = {
    */
   async syncTweet(tweet) {
     try {
+      // 获取配置信息
+      const config = await this.getSyncConfig();
+
+      // 生成智能标题
+      const title = await this.generateTweetTitle(tweet, config);
+
       // 格式化推文数据为 Linear Issue
       const issueData = {
-        title: `Tweet by ${tweet.author.name} (@${tweet.author.handle})`,
+        title: title,
         description: this.formatTweetDescription(tweet),
         teamId: await this.getDefaultTeamId(),
-        labelIds: await this.getTwitterLabels(),
+        labelIds: await this.getTwitterLabels(tweet, config),
       };
 
       // 创建 Issue
@@ -480,12 +486,317 @@ const LinearAPI = {
   },
 
   /**
+   * 生成推文标题
+   * @param {Object} tweet - 推文数据
+   * @param {Object} config - 配置选项
+   */
+  async generateTweetTitle(tweet, config = {}) {
+    const titleStyle = config.titleStyle || 'smart';
+    const maxLength = config.titleMaxLength || 100;
+
+    // 根据配置选择标题生成方式
+    switch (titleStyle) {
+      case 'content':
+        return this.generateContentTitle(tweet, maxLength);
+      case 'author':
+        return this.generateAuthorTitle(tweet);
+      case 'smart':
+      default:
+        return this.generateSmartTitle(tweet, maxLength);
+    }
+  },
+
+  /**
+   * 智能生成标题（内容优先）
+   */
+  generateSmartTitle(tweet, maxLength = 100) {
+    const { text, author } = tweet;
+
+    // 如果推文内容不为空，优先使用内容摘要
+    if (text && text.trim()) {
+      let title = text.trim();
+
+      // 移除多余的空白字符
+      title = title.replace(/\s+/g, ' ');
+
+      // 截取合适长度
+      if (title.length > maxLength) {
+        // 尝试在句号、感叹号或问号处截断
+        const breakPoints = /[。！？.!?]/;
+        const match = title.match(breakPoints);
+        if (match && match.index < maxLength - 10) {
+          title = title.substring(0, match.index + 1);
+        } else {
+          // 在空格处截断，避免截断单词
+          title = title.substring(0, maxLength).trim();
+          const lastSpace = title.lastIndexOf(' ');
+          if (lastSpace > maxLength * 0.7) {
+            title = title.substring(0, lastSpace);
+          }
+          title += '...';
+        }
+      }
+
+      // 添加作者信息后缀（如果空间允许）
+      const suffix = ` - ${author.name}`;
+      if (title.length + suffix.length <= maxLength + 20) {
+        title += suffix;
+      }
+
+      return title;
+    }
+
+    // 如果没有内容，使用作者名
+    return `Tweet by ${author.name} (@${author.handle})`;
+  },
+
+  /**
+   * 基于内容生成标题
+   */
+  generateContentTitle(tweet, maxLength = 100) {
+    const { text, author } = tweet;
+
+    if (text && text.trim()) {
+      let title = text.trim().replace(/\s+/g, ' ');
+
+      if (title.length > maxLength) {
+        title = title.substring(0, maxLength).trim();
+        const lastSpace = title.lastIndexOf(' ');
+        if (lastSpace > maxLength * 0.7) {
+          title = title.substring(0, lastSpace);
+        }
+        title += '...';
+      }
+
+      return title;
+    }
+
+    return `Tweet by ${author.name}`;
+  },
+
+  /**
+   * 基于作者生成标题
+   */
+  generateAuthorTitle(tweet) {
+    const { author, text } = tweet;
+    let title = `Tweet by ${author.name} (@${author.handle})`;
+
+    // 如果有内容且空间允许，添加内容预览
+    if (text && text.trim()) {
+      const preview = text.trim().substring(0, 50);
+      if (preview.length < text.trim().length) {
+        title += `: ${preview}...`;
+      } else {
+        title += `: ${preview}`;
+      }
+    }
+
+    return title;
+  },
+
+  /**
+   * 获取同步配置
+   */
+  async getSyncConfig() {
+    // 从 storage 获取配置
+    if (typeof Storage !== "undefined") {
+      return await Storage.getSyncConfig();
+    }
+
+    // 默认配置
+    const result = await chrome.storage.local.get("syncConfig");
+    return result.syncConfig || {
+      titleStyle: 'smart',
+      titleMaxLength: 100,
+      enableSmartLabels: true,
+      labelCategories: ['technology', 'business', 'entertainment', 'sports', 'politics', 'science']
+    };
+  },
+
+  /**
    * 获取 Twitter 相关标签
    */
-  async getTwitterLabels() {
-    // 这里可以实现获取或创建 Twitter 相关标签的逻辑
-    // 暂时返回空数组，后续可以扩展
-    return [];
+  async getTwitterLabels(tweet, config = {}) {
+    if (!config.enableSmartLabels) {
+      return [];
+    }
+
+    const labels = [];
+
+    // 基于推文内容生成标签
+    if (tweet.text && config.labelCategories) {
+      const contentLabels = this.extractContentLabels(tweet.text, config.labelCategories);
+      labels.push(...contentLabels);
+    }
+
+    // 添加媒体类型标签
+    if (tweet.media) {
+      const mediaLabels = this.extractMediaLabels(tweet.media);
+      labels.push(...mediaLabels);
+    }
+
+    // 获取或创建对应的 Linear 标签
+    return await this.getOrCreateLabels(labels);
+  },
+
+  /**
+   * 从推文内容中提取标签关键词
+   */
+  extractContentLabels(text, categories) {
+    const labels = [];
+    const lowerText = text.toLowerCase();
+
+    // 定义关键词映射
+    const keywordMap = {
+      'technology': ['tech', 'code', 'programming', 'software', 'ai', '开发', '技术', '编程', '人工智能'],
+      'business': ['business', 'startup', 'finance', 'economy', '市场', '商业', '创业', '经济'],
+      'entertainment': ['movie', 'music', 'game', 'entertainment', '电影', '音乐', '游戏', '娱乐'],
+      'sports': ['sport', 'game', 'match', '运动员', '体育', '比赛'],
+      'politics': ['politics', 'government', 'policy', '政治', '政府', '政策'],
+      'science': ['science', 'research', 'study', '科学', '研究', '学术']
+    };
+
+    for (const [category, keywords] of Object.entries(keywordMap)) {
+      if (categories.includes(category)) {
+        for (const keyword of keywords) {
+          if (lowerText.includes(keyword)) {
+            labels.push(category);
+            break;
+          }
+        }
+      }
+    }
+
+    return [...new Set(labels)]; // 去重
+  },
+
+  /**
+   * 从媒体信息中提取标签
+   */
+  extractMediaLabels(media) {
+    const labels = [];
+
+    if (media.images && media.images.length > 0) {
+      labels.push('images');
+      if (media.images.length > 1) {
+        labels.push('gallery');
+      }
+    }
+
+    if (media.videos && media.videos.length > 0) {
+      labels.push('video');
+    }
+
+    return labels;
+  },
+
+  /**
+   * 获取或创建 Linear 标签
+   */
+  async getOrCreateLabels(labelNames) {
+    const labelIds = [];
+
+    for (const labelName of labelNames) {
+      try {
+        // 首先尝试查找已存在的标签
+        const existingLabel = await this.findLabelByName(labelName);
+        if (existingLabel) {
+          labelIds.push(existingLabel.id);
+          continue;
+        }
+
+        // 如果标签不存在，创建新标签
+        const newLabel = await this.createLabel(labelName);
+        if (newLabel) {
+          labelIds.push(newLabel.id);
+        }
+      } catch (error) {
+        console.warn(`[LinearAPI] Failed to get/create label: ${labelName}`, error);
+      }
+    }
+
+    return labelIds;
+  },
+
+  /**
+   * 查找指定名称的标签
+   */
+  async findLabelByName(name) {
+    const query = `
+      query($teamId: String!) {
+        team(id: $teamId) {
+          labels {
+            nodes {
+              id
+              name
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const teamId = await this.getDefaultTeamId();
+      const result = await this.requestWithRetry(query, { teamId });
+
+      if (result?.team?.labels?.nodes) {
+        return result.team.labels.nodes.find(label =>
+          label.name.toLowerCase() === name.toLowerCase()
+        );
+      }
+    } catch (error) {
+      console.warn(`[LinearAPI] Error finding label: ${name}`, error);
+    }
+
+    return null;
+  },
+
+  /**
+   * 创建新标签
+   */
+  async createLabel(name) {
+    const mutation = `
+      mutation LabelCreate($input: LabelCreateInput!) {
+        labelCreate(input: $input) {
+          success
+          label {
+            id
+            name
+            color
+          }
+        }
+      }
+    `;
+
+    try {
+      const teamId = await this.getDefaultTeamId();
+      const variables = {
+        input: {
+          name: name,
+          teamId: teamId,
+          color: this.getRandomLabelColor()
+        }
+      };
+
+      const result = await this.requestWithRetry(mutation, variables);
+
+      if (result?.labelCreate?.success) {
+        console.log(`[LinearAPI] Created label: ${name}`);
+        return result.labelCreate.label;
+      }
+    } catch (error) {
+      console.warn(`[LinearAPI] Error creating label: ${name}`, error);
+    }
+
+    return null;
+  },
+
+  /**
+   * 获取随机标签颜色
+   */
+  getRandomLabelColor() {
+    const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
+    return colors[Math.floor(Math.random() * colors.length)];
   },
 
   /**

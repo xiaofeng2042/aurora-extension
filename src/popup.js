@@ -84,6 +84,21 @@ const elements = {
   historicalLikesStatus: document.getElementById("historicalLikesStatus"),
   syncCurrentPageBtn: document.getElementById("syncCurrentPageBtn"),
   clearHistoryBtn: document.getElementById("clearHistoryBtn"),
+  // 新增配置相关元素
+  titleStyleSelect: document.getElementById("titleStyleSelect"),
+  titleMaxLengthSlider: document.getElementById("titleMaxLengthSlider"),
+  titleLengthValue: document.getElementById("titleLengthValue"),
+  enableSmartLabels: document.getElementById("enableSmartLabels"),
+  smartLabelsStatus: document.getElementById("smartLabelsStatus"),
+  labelCategoriesContainer: document.getElementById("labelCategoriesContainer"),
+  enablePreview: document.getElementById("enablePreview"),
+  previewStatus: document.getElementById("previewStatus"),
+  autoSyncDelaySlider: document.getElementById("autoSyncDelaySlider"),
+  autoSyncDelayValue: document.getElementById("autoSyncDelayValue"),
+  // 预览队列相关元素
+  previewSectionTitle: document.getElementById("previewSectionTitle"),
+  previewCount: document.getElementById("previewCount"),
+  previewQueue: document.getElementById("previewQueue"),
 };
 
 // 调试日志存储
@@ -434,10 +449,272 @@ async function loadConfig() {
       elements.syncHistoricalLikes.checked = response.syncHistoricalLikes === true;
       updateHistoricalLikesStatus(response.syncHistoricalLikes);
 
+      // 加载同步配置
+      await loadSyncConfig();
+
       addDebugLog("配置加载成功", response);
     }
   } catch (error) {
     addDebugLog("加载配置失败", { error: error.message });
+  }
+}
+
+/**
+ * 加载同步配置
+ */
+async function loadSyncConfig() {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_CONFIG",
+    });
+
+    const config = response || {};
+
+    // 标题生成设置
+    elements.titleStyleSelect.value = config.titleStyle || 'smart';
+    elements.titleMaxLengthSlider.value = config.titleMaxLength || 100;
+    elements.titleLengthValue.textContent = config.titleMaxLength || 100;
+
+    // 标签设置
+    elements.enableSmartLabels.checked = config.enableSmartLabels !== false;
+    updateSmartLabelsStatus(config.enableSmartLabels !== false);
+
+    // 初始化标签分类复选框
+    initializeLabelCategories(config.labelCategories || []);
+
+    // 预览设置
+    elements.enablePreview.checked = config.enablePreview !== false;
+    updatePreviewStatus(config.enablePreview !== false);
+
+    // 同步延迟设置
+    const delaySeconds = Math.floor((config.autoSyncDelay || 3000) / 1000);
+    elements.autoSyncDelaySlider.value = delaySeconds;
+    elements.autoSyncDelayValue.textContent = delaySeconds;
+
+    addDebugLog("同步配置加载成功", config);
+  } catch (error) {
+    addDebugLog("加载同步配置失败", { error: error.message });
+  }
+}
+
+/**
+ * 初始化标签分类复选框
+ */
+function initializeLabelCategories(selectedCategories = []) {
+  const allCategories = [
+    { key: 'technology', label: '技术', keywords: ['tech', 'code', 'ai'] },
+    { key: 'business', label: '商业', keywords: ['business', 'startup'] },
+    { key: 'entertainment', label: '娱乐', keywords: ['movie', 'music'] },
+    { key: 'sports', label: '体育', keywords: ['sport', 'game'] },
+    { key: 'politics', label: '政治', keywords: ['politics', 'policy'] },
+    { key: 'science', label: '科学', keywords: ['science', 'research'] }
+  ];
+
+  elements.labelCategoriesContainer.innerHTML = '';
+
+  allCategories.forEach(category => {
+    const label = document.createElement('label');
+    label.style.cssText = 'display: inline-flex; align-items: center; padding: 4px 8px; background: #f3f4f6; border-radius: 4px; cursor: pointer; font-size: 0.75rem; color: #374151;';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = category.key;
+    checkbox.checked = selectedCategories.includes(category.key);
+    checkbox.style.marginRight = '4px';
+
+    checkbox.addEventListener('change', saveLabelCategories);
+
+    const text = document.createElement('span');
+    text.textContent = category.label;
+    text.title = `关键词: ${category.keywords.join(', ')}`;
+
+    label.appendChild(checkbox);
+    label.appendChild(text);
+    elements.labelCategoriesContainer.appendChild(label);
+  });
+}
+
+/**
+ * 保存标签分类设置
+ */
+async function saveLabelCategories() {
+  const checkboxes = elements.labelCategoriesContainer.querySelectorAll('input[type="checkbox"]:checked');
+  const selectedCategories = Array.from(checkboxes).map(cb => cb.value);
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "SET_CONFIG",
+      config: {
+        labelCategories: selectedCategories
+      }
+    });
+
+    if (response?.success) {
+      addDebugLog("标签分类保存成功", { categories: selectedCategories });
+    } else {
+      addDebugLog("标签分类保存失败", response);
+    }
+  } catch (error) {
+    addDebugLog("保存标签分类出错", { error: error.message });
+  }
+}
+
+/**
+ * 更新智能标签状态显示
+ */
+function updateSmartLabelsStatus(enabled) {
+  if (enabled) {
+    elements.smartLabelsStatus.textContent = "已启用";
+    elements.smartLabelsStatus.style.color = "#10b981";
+  } else {
+    elements.smartLabelsStatus.textContent = "已禁用";
+    elements.smartLabelsStatus.style.color = "#9ca3af";
+  }
+}
+
+/**
+ * 更新预览状态显示
+ */
+function updatePreviewStatus(enabled) {
+  if (enabled) {
+    elements.previewStatus.textContent = "已启用";
+    elements.previewStatus.style.color = "#10b981";
+  } else {
+    elements.previewStatus.textContent = "已禁用";
+    elements.previewStatus.style.color = "#9ca3af";
+  }
+}
+
+/**
+ * 保存标题样式设置
+ */
+async function saveTitleStyle() {
+  const titleStyle = elements.titleStyleSelect.value;
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "SET_CONFIG",
+      config: {
+        titleStyle: titleStyle
+      }
+    });
+
+    if (response?.success) {
+      addDebugLog("标题样式保存成功", { titleStyle });
+    } else {
+      addDebugLog("标题样式保存失败", response);
+    }
+  } catch (error) {
+    addDebugLog("保存标题样式出错", { error: error.message });
+  }
+}
+
+/**
+ * 保存标题最大长度设置
+ */
+async function saveTitleMaxLength() {
+  const maxLength = parseInt(elements.titleMaxLengthSlider.value);
+  elements.titleLengthValue.textContent = maxLength;
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "SET_CONFIG",
+      config: {
+        titleMaxLength: maxLength
+      }
+    });
+
+    if (response?.success) {
+      addDebugLog("标题最大长度保存成功", { maxLength });
+    } else {
+      addDebugLog("标题最大长度保存失败", response);
+    }
+  } catch (error) {
+    addDebugLog("保存标题最大长度出错", { error: error.message });
+  }
+}
+
+/**
+ * 保存智能标签设置
+ */
+async function saveSmartLabelsSetting() {
+  const enabled = elements.enableSmartLabels.checked;
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "SET_CONFIG",
+      config: {
+        enableSmartLabels: enabled
+      }
+    });
+
+    if (response?.success) {
+      updateSmartLabelsStatus(enabled);
+      addDebugLog("智能标签设置保存成功");
+    } else {
+      addDebugLog("智能标签设置保存失败", response);
+      // 回滚状态
+      elements.enableSmartLabels.checked = !enabled;
+    }
+  } catch (error) {
+    addDebugLog("保存智能标签设置出错", { error: error.message });
+    // 回滚状态
+    elements.enableSmartLabels.checked = !enabled;
+  }
+}
+
+/**
+ * 保存预览设置
+ */
+async function savePreviewSetting() {
+  const enabled = elements.enablePreview.checked;
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "SET_CONFIG",
+      config: {
+        enablePreview: enabled
+      }
+    });
+
+    if (response?.success) {
+      updatePreviewStatus(enabled);
+      addDebugLog("预览设置保存成功");
+    } else {
+      addDebugLog("预览设置保存失败", response);
+      // 回滚状态
+      elements.enablePreview.checked = !enabled;
+    }
+  } catch (error) {
+    addDebugLog("保存预览设置出错", { error: error.message });
+    // 回滚状态
+    elements.enablePreview.checked = !enabled;
+  }
+}
+
+/**
+ * 保存自动同步延迟设置
+ */
+async function saveAutoSyncDelay() {
+  const delaySeconds = parseInt(elements.autoSyncDelaySlider.value);
+  elements.autoSyncDelayValue.textContent = delaySeconds;
+  const delayMs = delaySeconds * 1000;
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "SET_CONFIG",
+      config: {
+        autoSyncDelay: delayMs
+      }
+    });
+
+    if (response?.success) {
+      addDebugLog("自动同步延迟保存成功", { delay: delayMs });
+    } else {
+      addDebugLog("自动同步延迟保存失败", response);
+    }
+  } catch (error) {
+    addDebugLog("保存自动同步延迟出错", { error: error.message });
   }
 }
 
@@ -878,6 +1155,279 @@ function escapeHtml(text) {
 }
 
 /**
+ * 加载预览队列
+ */
+async function loadPreviewQueue() {
+  try {
+    addDebugLog("开始加载预览队列");
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_PREVIEW_QUEUE",
+    });
+
+    if (response && response.queue) {
+      addDebugLog(`获取到 ${response.queue.length} 个预览项目`);
+      renderPreviewQueue(response.queue);
+    } else {
+      addDebugLog("预览队列为空或获取失败");
+      hidePreviewSection();
+    }
+  } catch (error) {
+    addDebugLog("加载预览队列失败", { error: error.message });
+    hidePreviewSection();
+  }
+}
+
+/**
+ * 渲染预览队列
+ */
+function renderPreviewQueue(queue) {
+  const pendingItems = queue.filter(item => item.status === 'pending');
+  const confirmedItems = queue.filter(item => item.status === 'confirmed');
+
+  if (pendingItems.length === 0 && confirmedItems.length === 0) {
+    hidePreviewSection();
+    return;
+  }
+
+  // 显示预览区域
+  elements.previewSectionTitle.style.display = "block";
+  elements.previewQueue.style.display = "block";
+  elements.previewCount.textContent = `(${pendingItems.length})`;
+
+  let html = "";
+
+  // 添加批量操作按钮（有待处理项目时）
+  if (pendingItems.length > 0) {
+    html += `
+      <div class="batch-actions">
+        <button class="batch-btn batch-confirm-all" onclick="batchConfirmAll()">全部同步 (${pendingItems.length})</button>
+        <button class="batch-btn batch-skip-all" onclick="batchSkipAll()">全部跳过</button>
+      </div>
+    `;
+  }
+
+  // 渲染每个预览项目
+  queue.forEach(item => {
+    const timeUntilAuto = getTimeUntilAutoSync(item.autoSyncAt);
+    const statusClass = `status-${item.status}`;
+    const statusText = item.status === 'pending' ? '待确认' : '已确认';
+
+    html += `
+      <div class="preview-item ${statusClass}">
+        <div class="preview-item-status">${statusText}</div>
+        <div class="post-author">
+          ${escapeHtml(item.author.name)}
+          ${item.author.handle ? `@${escapeHtml(item.author.handle)}` : ""}
+        </div>
+        <div class="post-text">${escapeHtml(item.text || "无内容")}</div>
+        ${item.status === 'pending' && timeUntilAutoSync ?
+          `<div class="preview-auto-time">自动同步: ${timeUntilAuto}</div>` :
+          ''
+        }
+        ${item.status === 'pending' ? `
+          <div class="preview-actions">
+            <button class="preview-btn preview-btn-confirm" onclick="confirmPreviewItem('${item.tweetId}')">同步</button>
+            <button class="preview-btn preview-btn-skip" onclick="skipPreviewItem('${item.tweetId}')">跳过</button>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  });
+
+  elements.previewQueue.innerHTML = html;
+}
+
+/**
+ * 隐藏预览区域
+ */
+function hidePreviewSection() {
+  elements.previewSectionTitle.style.display = "none";
+  elements.previewQueue.style.display = "none";
+}
+
+/**
+ * 计算距离自动同步的时间
+ */
+function getTimeUntilAutoSync(autoSyncAt) {
+  if (!autoSyncAt) return null;
+
+  const now = new Date();
+  const autoTime = new Date(autoSyncAt);
+  const diff = autoTime - now;
+
+  if (diff <= 0) return '即将同步';
+
+  const minutes = Math.floor(diff / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+
+  if (minutes > 0) {
+    return `${minutes}分${seconds}秒后自动同步`;
+  } else {
+    return `${seconds}秒后自动同步`;
+  }
+}
+
+/**
+ * 确认单个预览项目
+ */
+async function confirmPreviewItem(tweetId) {
+  try {
+    addDebugLog("确认预览项目", { tweetId });
+
+    // 禁用按钮避免重复点击
+    const button = event.target;
+    button.disabled = true;
+    button.textContent = "同步中...";
+
+    const response = await chrome.runtime.sendMessage({
+      type: "CONFIRM_PREVIEW_ITEM",
+      payload: { tweetId }
+    });
+
+    if (response?.success) {
+      addDebugLog("预览项目同步成功", { tweetId });
+      // 刷新预览队列和统计数据
+      await loadPreviewQueue();
+      await loadStats();
+      await loadRecentPosts();
+    } else {
+      addDebugLog("预览项目同步失败", { tweetId, error: response?.error });
+      alert(`同步失败: ${response?.error || "未知错误"}`);
+      button.disabled = false;
+      button.textContent = "同步";
+    }
+  } catch (error) {
+    addDebugLog("确认预览项目出错", { tweetId, error: error.message });
+    alert(`操作失败: ${error.message}`);
+    event.target.disabled = false;
+    event.target.textContent = "同步";
+  }
+}
+
+/**
+ * 跳过单个预览项目
+ */
+async function skipPreviewItem(tweetId) {
+  try {
+    addDebugLog("跳过预览项目", { tweetId });
+
+    const button = event.target;
+    button.disabled = true;
+    button.textContent = "跳过中...";
+
+    const response = await chrome.runtime.sendMessage({
+      type: "SKIP_PREVIEW_ITEM",
+      payload: { tweetId }
+    });
+
+    if (response?.success) {
+      addDebugLog("预览项目跳过成功", { tweetId });
+      await loadPreviewQueue();
+    } else {
+      addDebugLog("预览项目跳过失败", { tweetId, error: response?.error });
+      button.disabled = false;
+      button.textContent = "跳过";
+    }
+  } catch (error) {
+    addDebugLog("跳过预览项目出错", { tweetId, error: error.message });
+    event.target.disabled = false;
+    event.target.textContent = "跳过";
+  }
+}
+
+/**
+ * 批量确认所有待处理项目
+ */
+async function batchConfirmAll() {
+  try {
+    addDebugLog("开始批量确认预览项目");
+
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_PREVIEW_QUEUE",
+    });
+
+    if (response?.queue) {
+      const pendingItems = response.queue.filter(item => item.status === 'pending');
+
+      if (pendingItems.length === 0) {
+        alert("没有待确认的项目");
+        return;
+      }
+
+      const tweetIds = pendingItems.map(item => item.tweetId);
+
+      const batchResponse = await chrome.runtime.sendMessage({
+        type: "BATCH_CONFIRM_PREVIEW",
+        payload: { tweetIds }
+      });
+
+      if (batchResponse?.results) {
+        const successCount = batchResponse.results.filter(r => r.success).length;
+        const failCount = batchResponse.results.length - successCount;
+
+        addDebugLog("批量确认完成", {
+          total: batchResponse.results.length,
+          success: successCount,
+          failed: failCount
+        });
+
+        alert(`批量同步完成: 成功 ${successCount} 个，失败 ${failCount} 个`);
+
+        // 刷新界面
+        await loadPreviewQueue();
+        await loadStats();
+        await loadRecentPosts();
+      }
+    }
+  } catch (error) {
+    addDebugLog("批量确认出错", { error: error.message });
+    alert(`批量操作失败: ${error.message}`);
+  }
+}
+
+/**
+ * 批量跳过所有待处理项目
+ */
+async function batchSkipAll() {
+  try {
+    addDebugLog("开始批量跳过预览项目");
+
+    const response = await chrome.runtime.sendMessage({
+      type: "GET_PREVIEW_QUEUE",
+    });
+
+    if (response?.queue) {
+      const pendingItems = response.queue.filter(item => item.status === 'pending');
+
+      if (pendingItems.length === 0) {
+        alert("没有待跳过的项目");
+        return;
+      }
+
+      if (!confirm(`确定要跳过 ${pendingItems.length} 个待同步项目吗？`)) {
+        return;
+      }
+
+      // 逐个跳过
+      for (const item of pendingItems) {
+        await chrome.runtime.sendMessage({
+          type: "SKIP_PREVIEW_ITEM",
+          payload: { tweetId: item.tweetId }
+        });
+      }
+
+      addDebugLog("批量跳过完成", { count: pendingItems.length });
+
+      // 刷新界面
+      await loadPreviewQueue();
+    }
+  } catch (error) {
+    addDebugLog("批量跳过出错", { error: error.message });
+    alert(`批量操作失败: ${error.message}`);
+  }
+}
+
+/**
  * 监听来自 background 的消息
  */
 chrome.runtime.onMessage.addListener((message) => {
@@ -886,7 +1436,18 @@ chrome.runtime.onMessage.addListener((message) => {
     loadStats();
     loadRecentPosts();
   }
+
+  if (message.type === "PREVIEW_QUEUE_UPDATED") {
+    // 预览队列更新，刷新预览区域
+    loadPreviewQueue();
+  }
 });
+
+// 将函数暴露到全局作用域，以便 HTML 中的 onclick 可以访问
+window.confirmPreviewItem = confirmPreviewItem;
+window.skipPreviewItem = skipPreviewItem;
+window.batchConfirmAll = batchConfirmAll;
+window.batchSkipAll = batchSkipAll;
 
 /**
  * 初始化
@@ -897,6 +1458,9 @@ async function init() {
   // 加载数据
   addDebugLog("加载统计数据");
   await loadStats();
+
+  addDebugLog("加载预览队列");
+  await loadPreviewQueue();
 
   addDebugLog("加载最近帖子");
   await loadRecentPosts();
@@ -929,6 +1493,13 @@ async function init() {
   elements.syncCurrentPageBtn.addEventListener("click", syncCurrentPage);
   elements.clearHistoryBtn.addEventListener("click", clearSyncHistory);
 
+  // 新增配置相关事件
+  elements.titleStyleSelect.addEventListener("change", saveTitleStyle);
+  elements.titleMaxLengthSlider.addEventListener("input", saveTitleMaxLength);
+  elements.enableSmartLabels.addEventListener("change", saveSmartLabelsSetting);
+  elements.enablePreview.addEventListener("change", savePreviewSetting);
+  elements.autoSyncDelaySlider.addEventListener("input", saveAutoSyncDelay);
+
   // Token 输入框回车保存
   elements.tokenInput.addEventListener("keypress", (e) => {
     if (e.key === "Enter") {
@@ -946,6 +1517,7 @@ async function init() {
   // 定期刷新数据
   setInterval(() => {
     loadStats();
+    loadPreviewQueue();
     loadRecentPosts();
   }, 10000); // 每 10 秒刷新
 

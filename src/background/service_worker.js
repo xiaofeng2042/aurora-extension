@@ -3,10 +3,509 @@
  * 处理推文同步、队列管理和错误重试
  */
 
-// 导入共享模块(在 service worker 中需要使用 importScripts)
-importScripts("../shared/storage.js", "../shared/linear_api.js");
-
 const DEBUG = true;
+
+// 内嵌Storage模块避免importScripts问题
+const Storage = {
+  // 存储键名常量
+  KEYS: {
+    SYNCED_TWEETS: "syncedTweets",
+    SYNC_STATS: "syncStats",
+    LINEAR_TOKEN: "linearToken",
+    LINEAR_TEAM_ID: "linearTeamId",
+    RECENT_POSTS: "recentPosts",
+    SYNC_QUEUE: "syncQueue",
+    INSTALL_TIMESTAMP: "installTimestamp",
+    SYNC_HISTORICAL_LIKES: "syncHistoricalLikes",
+    CONFIG: "auroraConfig",
+    PREVIEW_QUEUE: "previewQueue",
+  },
+
+  async get(key) {
+    try {
+      const result = await chrome.storage.local.get(key);
+      return result[key];
+    } catch (error) {
+      console.error(`[Storage] Error getting ${key}:`, error);
+      return null;
+    }
+  },
+
+  async set(key, value) {
+    try {
+      await chrome.storage.local.set({ [key]: value });
+      return true;
+    } catch (error) {
+      console.error(`[Storage] Error setting ${key}:`, error);
+      return false;
+    }
+  },
+
+  // 基本方法实现
+  async getLinearToken() {
+    return await this.get(this.KEYS.LINEAR_TOKEN);
+  },
+
+  async getLinearTeamId() {
+    return await this.get(this.KEYS.LINEAR_TEAM_ID);
+  },
+
+  async getConfig() {
+    return await this.get(this.KEYS.CONFIG) || {};
+  },
+
+  async setConfig(config) {
+    return await this.set(this.KEYS.CONFIG, config);
+  }
+};
+
+// 内嵌LinearAPI模块避免importScripts问题
+const LinearAPI = {
+  GRAPHQL_ENDPOINT: "https://api.linear.app/graphql",
+
+  config: {
+    timeout: 10000,
+    maxRetries: 3,
+    retryDelay: 1000,
+  },
+
+  /**
+   * 睡眠函数
+   */
+  sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  },
+
+  /**
+   * 设置 Token
+   */
+  async setToken(token) {
+    await Storage.set(Storage.KEYS.LINEAR_TOKEN, token);
+    return true;
+  },
+
+  /**
+   * 发送 GraphQL 查询
+   */
+  async requestGraphQL(query, variables = {}, tokenOverride = null) {
+    const token = tokenOverride ?? (await Storage.get(Storage.KEYS.LINEAR_TOKEN));
+
+    if (!token) {
+      const error = "Linear API token not configured";
+      console.error("[LinearAPI] Error:", error);
+      throw new Error(error);
+    }
+
+    const requestBody = {
+      query: query,
+      variables: variables,
+    };
+
+    try {
+      // 检查token格式：如果以"lin_api_"开头，直接使用；否则添加Bearer前缀
+      const authHeader = token.startsWith("lin_api_") ? token : `Bearer ${token}`;
+
+      const response = await fetch(this.GRAPHQL_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": authHeader,
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let error = {};
+        try {
+          error = JSON.parse(errorText);
+        } catch (e) {
+          error = { message: errorText };
+        }
+
+        throw new Error(
+          error.message || `HTTP ${response.status}: ${response.statusText}`
+        );
+      }
+
+      const result = await response.json();
+
+      if (result.errors) {
+        throw new Error(result.errors[0].message);
+      }
+
+      return result.data;
+    } catch (error) {
+      console.error("[LinearAPI] Network/Request Error:", error);
+      throw error;
+    }
+  },
+
+  /**
+   * 带重试的 GraphQL 请求
+   */
+  async requestWithRetry(query, variables = {}, retries = 0, tokenOverride = null) {
+    try {
+      return await this.requestGraphQL(query, variables, tokenOverride);
+    } catch (error) {
+      if (retries < this.config.maxRetries) {
+        log(
+          `Retry ${retries + 1}/${this.config.maxRetries} after error:`,
+          error.message
+        );
+
+        // 指数退避
+        const delay = this.config.retryDelay * Math.pow(2, retries);
+        await this.sleep(delay);
+
+        return this.requestWithRetry(query, variables, retries + 1, tokenOverride);
+      }
+
+      throw error;
+    }
+  },
+
+  /**
+   * 验证 Token 是否有效
+   */
+  async validateToken(token) {
+    if (!token) {
+      return {
+        valid: false,
+        error: "Token 不能为空",
+      };
+    }
+
+    // 检查Token格式
+    if (token.length < 20) {
+      return {
+        valid: false,
+        error: "Token 格式不正确，长度太短。请确保使用正确的 Linear API Key。",
+      };
+    }
+
+    // 预检查：提供Token格式提示
+    if (!token.startsWith("lin_api_") && !token.startsWith("lin_")) {
+      log("Warning: Token 可能格式不正确。Linear API Key 通常以 'lin_api_' 开头");
+    }
+
+    try {
+      // 使用最简单的查询进行验证
+      const query = `
+        query {
+          viewer {
+            id
+          }
+        }
+      `;
+
+      await this.requestWithRetry(query, {}, 0, token);
+      await this.setToken(token);
+
+      return {
+        valid: true,
+      };
+    } catch (error) {
+      console.error("[LinearAPI] Token validation failed:", error);
+      return {
+        valid: false,
+        error: error.message || "Token 验证失败",
+      };
+    }
+  },
+
+  /**
+   * 获取团队列表
+   */
+  async getTeams() {
+    const query = `
+      query {
+        teams {
+          nodes {
+            id
+            name
+            key
+          }
+        }
+      }
+    `;
+
+    return await this.requestWithRetry(query);
+  },
+
+  /**
+   * 验证团队 ID 是否有效且可访问
+   */
+  async validateTeamId(teamId) {
+    if (!teamId) {
+      return {
+        valid: false,
+        error: "团队 ID 不能为空",
+      };
+    }
+
+    // 检查UUID格式 (简单验证)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(teamId)) {
+      return {
+        valid: false,
+        error: "团队 ID 格式不正确，应为 UUID 格式",
+      };
+    }
+
+    try {
+      const query = `
+        query($teamId: String!) {
+          team(id: $teamId) {
+            id
+            name
+            key
+          }
+        }
+      `;
+
+      const result = await this.requestWithRetry(query, { teamId });
+
+      if (result && result.team) {
+        // 验证成功，保存团队ID
+        await Storage.set(Storage.KEYS.LINEAR_TEAM_ID, teamId);
+        return {
+          valid: true,
+          team: result.team,
+        };
+      } else {
+        return {
+          valid: false,
+          error: "团队不存在或无权限访问",
+        };
+      }
+    } catch (error) {
+      console.error("[LinearAPI] Team validation failed:", error);
+      return {
+        valid: false,
+        error: error.message || "团队验证失败",
+      };
+    }
+  },
+
+  /**
+   * 检查 API 连接状态（完整验证）
+   */
+  async checkConnection() {
+    try {
+      log("Starting connection check...");
+      
+      // 1. 检查 Token
+      const token = await Storage.getLinearToken();
+      if (!token) {
+        log("Connection check failed: No token");
+        return {
+          connected: false,
+          status: "no_token",
+          error: "未配置 Linear API Token"
+        };
+      }
+      
+      log("Token found, checking validity...");
+      
+      // 2. 检查团队 ID
+      const teamId = await Storage.getLinearTeamId();
+      if (!teamId) {
+        log("Connection check failed: No team ID");
+        return {
+          connected: false,
+          status: "no_team",
+          error: "未配置团队 ID"
+        };
+      }
+      
+      log("Team ID found, testing API connection...");
+      
+      // 3. 实际测试 API 连接
+      const query = `
+        query {
+          viewer {
+            id
+            name
+            email
+          }
+        }
+      `;
+      
+      const result = await this.requestWithRetry(query);
+      
+      if (result && result.viewer) {
+        log("Connection check successful:", result.viewer);
+        return {
+          connected: true,
+          status: "ok",
+          viewer: result.viewer
+        };
+      } else {
+        log("Connection check failed: Invalid response");
+        return {
+          connected: false,
+          status: "invalid_response",
+          error: "API 返回数据异常"
+        };
+      }
+    } catch (error) {
+      log("Connection check error:", error);
+      return {
+        connected: false,
+        status: "error",
+        error: error.message || "连接测试失败"
+      };
+    }
+  },
+
+  /**
+   * 将推文同步到 Linear
+   */
+  async syncTweet(tweetData) {
+    try {
+      log("Syncing tweet to Linear:", tweetData.tweetId);
+
+      // 获取配置
+      const config = await Storage.getConfig();
+      const teamId = await Storage.getLinearTeamId();
+
+      if (!teamId) {
+        throw new Error("未配置 Linear 团队 ID");
+      }
+
+      // 生成标题
+      const title = this.generateTweetTitle(tweetData, config);
+
+      // 格式化描述
+      const description = this.formatTweetDescription(tweetData);
+
+      // 创建 Issue
+      const mutation = `
+        mutation CreateIssue($input: IssueCreateInput!) {
+          issueCreate(input: $input) {
+            success
+            issue {
+              id
+              title
+              description
+              identifier
+              url
+              createdAt
+            }
+          }
+        }
+      `;
+
+      const variables = {
+        input: {
+          title: title,
+          description: description,
+          teamId: teamId,
+          labelIds: []
+        }
+      };
+
+      const result = await this.requestWithRetry(mutation, variables);
+
+      if (result?.issueCreate?.success) {
+        log("Tweet synced successfully:", result.issueCreate.issue.identifier);
+        return {
+          success: true,
+          data: result.issueCreate.issue
+        };
+      } else {
+        throw new Error("Issue 创建失败");
+      }
+    } catch (error) {
+      log("Failed to sync tweet:", error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  },
+
+  /**
+   * 生成推文标题
+   */
+  generateTweetTitle(tweet, config = {}) {
+    const titleStyle = config.titleStyle || 'smart';
+    const maxLength = config.titleMaxLength || 100;
+
+    const { text, author } = tweet;
+
+    // 智能标题生成
+    if (text && text.trim()) {
+      let title = text.trim().replace(/\s+/g, ' ');
+
+      if (title.length > maxLength) {
+        title = title.substring(0, maxLength).trim();
+        const lastSpace = title.lastIndexOf(' ');
+        if (lastSpace > maxLength * 0.7) {
+          title = title.substring(0, lastSpace);
+        }
+        title += '...';
+      }
+
+      const suffix = ` - ${author.name}`;
+      if (title.length + suffix.length <= maxLength + 20) {
+        title += suffix;
+      }
+
+      return title;
+    }
+
+    return `Tweet by ${author.name} (@${author.handle})`;
+  },
+
+  /**
+   * 格式化推文描述
+   */
+  formatTweetDescription(tweet) {
+    let description = `**来自 X.com 的推文**\n\n`;
+
+    description += `**推文内容:**\n${tweet.text || '(无文本内容)'}\n\n`;
+
+    description += `**推主:** ${tweet.author.name} (@${tweet.author.handle})\n\n`;
+
+    description += `**发布时间:** ${new Date(tweet.timestamp).toLocaleString()}\n\n`;
+
+    if (tweet.url) {
+      description += `**原链接:** [查看推文](${tweet.url})\n\n`;
+    }
+
+    // 添加图片
+    if (tweet.media?.images?.length > 0) {
+      description += `**图片 (${tweet.media.images.length} 张):**\n\n`;
+      tweet.media.images.forEach((imageUrl, index) => {
+        if (imageUrl) {
+          let displayUrl = imageUrl;
+          if (imageUrl.includes('pbs.twimg.com') || imageUrl.includes('twimg.com')) {
+            if (!imageUrl.includes('name=')) {
+              displayUrl += '&name=large';
+            }
+          }
+          description += `![图片 ${index + 1}](${displayUrl})\n\n`;
+        }
+      });
+    }
+
+    // 添加视频
+    if (tweet.media?.videos?.length > 0) {
+      description += `**视频 (${tweet.media.videos.length} 个):**\n\n`;
+      tweet.media.videos.forEach((videoUrl, index) => {
+        if (videoUrl) {
+          description += `📹 [视频 ${index + 1}](${videoUrl})\n\n`;
+        }
+      });
+    }
+
+    description += `\n---\n*由 Aurora 扩展自动同步*`;
+
+    return description;
+  }
+};
 
 function log(...args) {
   if (DEBUG) console.log("[Aurora Background]", ...args);
@@ -25,133 +524,128 @@ async function handleNewLikedPost(tweetData) {
   log("Handling new liked post:", tweetData.tweetId);
 
   try {
-    // 1. 检查是否已同步
-    const alreadySynced = await Storage.isTweetSynced(tweetData.tweetId);
-    if (alreadySynced) {
-      log("Tweet already synced, skipping:", tweetData.tweetId);
-      return { success: true, skipped: true };
+    // 1. 检查是否已同步过
+    const syncedTweets = await Storage.get(Storage.KEYS.SYNCED_TWEETS) || new Set();
+    if (syncedTweets.has?.(tweetData.tweetId) || Array.from(syncedTweets || []).includes(tweetData.tweetId)) {
+      log("Tweet already synced:", tweetData.tweetId);
+      return { success: true, message: "Tweet already synced", skipped: true };
     }
 
-    // 2. 检查是否有 Linear Token
-    const token = await Storage.getLinearToken();
-    if (!token) {
-      log("Linear token not configured, adding to queue");
-      await Storage.addToSyncQueue(tweetData);
-      return {
-        success: false,
-        error: "Linear token not configured",
-        queued: true,
-      };
-    }
-
-    // 3. 同步到 Linear
-    syncState.isSync = true;
-    syncState.currentTweet = tweetData;
-
+    // 2. 同步到 Linear
     const result = await LinearAPI.syncTweet(tweetData);
 
     if (result.success) {
-      // 同步成功
-      await Storage.markTweetSynced(tweetData.tweetId);
-      await Storage.updateSyncStats(true);
-      await Storage.addRecentPost(tweetData);
+      log("✓ Successfully synced tweet to Linear:", tweetData.tweetId);
 
-      log("Tweet synced successfully:", tweetData.tweetId);
+      // 3. 记录已同步的推文
+      const updatedSet = new Set(syncedTweets || []);
+      updatedSet.add(tweetData.tweetId);
+      await Storage.set(Storage.KEYS.SYNCED_TWEETS, Array.from(updatedSet));
 
-      // 通知 popup 更新
-      notifyPopup({ type: "SYNC_SUCCESS", tweet: tweetData });
+      // 4. 更新统计
+      await updateSyncStats(tweetData, result.data);
 
-      // 通知 content script 显示页面通知
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]) {
-          chrome.tabs.sendMessage(tabs[0].id, {
-            type: "SYNC_SUCCESS",
-            payload: { tweetId: tweetData.tweetId }
-          }).catch(() => {
-            // 忽略错误，页面可能未加载 Aurora
-          });
+      // 5. 添加到最近帖子列表
+      await addRecentPost(tweetData, result.data);
+
+      // 6. 通知 popup 更新
+      notifyPopup({
+        type: "SYNC_SUCCESS",
+        payload: {
+          tweetId: tweetData.tweetId,
+          linearIssue: result.data
         }
       });
 
-      syncState.isSync = false;
-      syncState.currentTweet = null;
-
-      return { success: true };
+      return {
+        success: true,
+        message: "Tweet synced successfully",
+        data: result.data
+      };
     } else {
-      // 同步失败,加入队列等待重试
-      await Storage.addToSyncQueue(tweetData);
-      await Storage.updateSyncStats(false);
+      log("✗ Failed to sync tweet:", result.error);
 
-      log("Tweet sync failed, added to queue:", result.error);
-
-      syncState.isSync = false;
-      syncState.currentTweet = null;
+      // 通知同步失败
+      notifyPopup({
+        type: "SYNC_ERROR",
+        payload: {
+          tweetId: tweetData.tweetId,
+          error: result.error
+        }
+      });
 
       return {
         success: false,
-        error: result.error,
-        queued: true,
+        error: result.error
       };
     }
   } catch (error) {
     log("Error handling liked post:", error);
-
-    syncState.isSync = false;
-    syncState.currentTweet = null;
-
-    // 加入队列等待重试
-    await Storage.addToSyncQueue(tweetData);
-
     return {
       success: false,
       error: error.message,
-      queued: true,
     };
   }
 }
 
 /**
- * 处理同步队列中的失败项目(重试)
+ * 更新同步统计
  */
-async function processQueuedTweets() {
-  log("Processing queued tweets...");
+async function updateSyncStats(tweetData, linearIssue) {
+  try {
+    const stats = await Storage.get(Storage.KEYS.SYNC_STATS) || {
+      totalSynced: 0,
+      todaySynced: 0,
+      lastSyncDate: null
+    };
 
-  const queue = await Storage.getSyncQueue();
+    // 检查是否是新的一天
+    const today = new Date().toDateString();
+    if (stats.lastSyncDate !== today) {
+      stats.todaySynced = 0;
+      stats.lastSyncDate = today;
+    }
 
-  if (queue.length === 0) {
-    log("Queue is empty");
-    return;
+    // 更新统计
+    stats.totalSynced++;
+    stats.todaySynced++;
+
+    await Storage.set(Storage.KEYS.SYNC_STATS, stats);
+    log("Updated sync stats:", stats);
+  } catch (error) {
+    log("Error updating sync stats:", error);
   }
+}
 
-  log(`Found ${queue.length} tweets in queue`);
+/**
+ * 添加到最近帖子列表
+ */
+async function addRecentPost(tweetData, linearIssue) {
+  try {
+    const recentPosts = await Storage.get(Storage.KEYS.RECENT_POSTS) || [];
 
-  for (const item of queue) {
-    // 检查重试次数
-    if (item.retryCount >= 5) {
-      log(`Max retries reached for tweet ${item.tweetId}, removing from queue`);
-      await Storage.removeFromSyncQueue(item.tweetId);
-      continue;
+    // 添加新帖子（包含同步时间和 Linear 信息）
+    const post = {
+      ...tweetData,
+      syncedAt: new Date().toISOString(),
+      linearIssue: {
+        id: linearIssue.id,
+        identifier: linearIssue.identifier,
+        url: linearIssue.url
+      }
+    };
+
+    recentPosts.unshift(post);
+
+    // 只保留最近 20 个
+    if (recentPosts.length > 20) {
+      recentPosts.splice(20);
     }
 
-    // 尝试同步
-    const result = await LinearAPI.syncTweet(item);
-
-    if (result.success) {
-      // 成功,从队列移除
-      await Storage.markTweetSynced(item.tweetId);
-      await Storage.removeFromSyncQueue(item.tweetId);
-      await Storage.updateSyncStats(true);
-      await Storage.addRecentPost(item);
-
-      log(`Queued tweet synced successfully: ${item.tweetId}`);
-    } else {
-      // 失败,增加重试计数
-      await Storage.incrementRetryCount(item.tweetId);
-      log(`Queued tweet sync failed: ${item.tweetId}, will retry later`);
-    }
-
-    // 添加延迟避免速率限制
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await Storage.set(Storage.KEYS.RECENT_POSTS, recentPosts);
+    log("Added to recent posts:", tweetData.tweetId);
+  } catch (error) {
+    log("Error adding recent post:", error);
   }
 }
 
@@ -189,30 +683,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  if (message.type === "GET_SYNC_STATS") {
-    // 获取同步统计
-    Storage.getSyncStats().then((stats) => {
-      sendResponse(stats);
-    });
-    return true;
-  }
-
-  if (message.type === "GET_RECENT_POSTS") {
-    // 获取最近帖子
-    Storage.getRecentPosts(message.limit || 5).then((posts) => {
-      sendResponse(posts);
-    });
-    return true;
-  }
-
-  if (message.type === "PROCESS_QUEUE") {
-    // 手动触发队列处理
-    processQueuedTweets().then(() => {
-      sendResponse({ success: true });
-    });
-    return true;
-  }
-
   if (message.type === "SET_LINEAR_TOKEN") {
     (async () => {
       try {
@@ -232,140 +702,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "CHECK_LINEAR_CONNECTION") {
-    // 检查 Linear 连接
+    // 检查 Linear 连接 - 使用完整验证
     (async () => {
       try {
-        log("Checking Linear connection...");
-        const status = await LinearAPI.checkConnection();
-        log("Linear connection status:", status);
-        sendResponse(status);
+        log("Checking Linear connection (full validation)...");
+        const result = await LinearAPI.checkConnection();
+        log("Connection check result:", result);
+        sendResponse(result);
       } catch (error) {
         log("Error checking Linear connection:", error);
         sendResponse({
           connected: false,
           status: "error",
           error: error.message
-        });
-      }
-    })();
-    return true;
-  }
-
-  if (message.type === "GET_LINEAR_TEAMS") {
-    // 获取 Linear 团队列表
-    (async () => {
-      try {
-        log("Fetching Linear teams...");
-        const teams = await LinearAPI.getTeams();
-        log("Linear teams fetched:", teams);
-        sendResponse({ teams: teams.teams.nodes });
-      } catch (error) {
-        log("Error fetching Linear teams:", error);
-        sendResponse({
-          teams: [],
-          error: error.message
-        });
-      }
-    })();
-    return true;
-  }
-
-  if (message.type === "GET_LINEAR_TEAM") {
-    // 获取当前配置的 Linear 团队
-    (async () => {
-      try {
-        const teamId = await LinearAPI.getTeamId();
-        if (teamId) {
-          // 尝试获取团队详细信息
-          try {
-            const result = await LinearAPI.validateTeamId(teamId);
-            if (result.valid && result.team) {
-              sendResponse({
-                teamId: teamId,
-                teamName: result.team.name,
-                teamKey: result.team.key
-              });
-            } else {
-              sendResponse({ teamId: teamId });
-            }
-          } catch (error) {
-            log("Error validating team:", error);
-            sendResponse({ teamId: teamId });
-          }
-        } else {
-          sendResponse(null);
-        }
-      } catch (error) {
-        log("Error getting Linear team:", error);
-        sendResponse({
-          error: error.message
-        });
-      }
-    })();
-    return true;
-  }
-
-  if (message.type === "SET_LINEAR_TEAM") {
-    // 设置并验证 Linear 团队 ID
-    (async () => {
-      try {
-        log("Setting Linear team:", message.teamId);
-        const result = await LinearAPI.validateTeamId(message.teamId);
-
-        if (result.valid) {
-          sendResponse({
-            success: true,
-            team: result.team
-          });
-        } else {
-          sendResponse({
-            success: false,
-            error: result.error
-          });
-        }
-      } catch (error) {
-        log("Failed to set Linear team:", error);
-        sendResponse({
-          success: false,
-          error: error.message
-        });
-      }
-    })();
-    return true;
-  }
-
-  if (message.type === "GET_DEBUG_INFO") {
-    // 获取调试信息
-    (async () => {
-      try {
-        const config = await Storage.getConfig();
-        const installTimestamp = await Storage.getInstallTimestamp();
-
-        const debugInfo = {
-          timestamp: new Date().toISOString(),
-          extensionId: chrome.runtime.id,
-          storage: {
-            linearToken: await Storage.getLinearToken() ? "已配置" : "未配置",
-            linearTeamId: await LinearAPI.getTeamId() || "未配置",
-            syncStats: await Storage.getSyncStats(),
-            queueSize: (await Storage.getSyncQueue()).length,
-            storageUsage: await Storage.getStorageUsage(),
-            syncedTweetsCount: ((await Storage.get(Storage.KEYS.SYNCED_TWEETS)) || []).length
-          },
-          config: config,
-          installTimestamp: installTimestamp,
-          syncState: {
-            isSync: syncState.isSync,
-            currentTweet: syncState.currentTweet?.tweetId || null
-          }
-        };
-
-        sendResponse(debugInfo);
-      } catch (error) {
-        log("Error getting debug info:", error);
-        sendResponse({
-          error: error.message,
-          timestamp: new Date().toISOString()
         });
       }
     })();
@@ -402,23 +751,78 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === "CHECK_HISTORICAL_TWEET") {
-    // 检查是否为历史推文
+  if (message.type === "GET_LINEAR_TEAMS") {
+    // 获取团队列表
     (async () => {
       try {
-        const { timestamp } = message.payload;
-        const isHistorical = await Storage.isHistoricalTweet(timestamp);
-        const shouldSyncHistorical = await Storage.shouldSyncHistoricalLikes();
+        log("Fetching Linear teams...");
+        const result = await LinearAPI.getTeams();
 
-        sendResponse({
-          isHistorical,
-          shouldSync: !isHistorical || shouldSyncHistorical
-        });
+        if (result && result.teams && result.teams.nodes) {
+          log(`Found ${result.teams.nodes.length} teams`);
+          sendResponse({
+            success: true,
+            teams: result.teams.nodes
+          });
+        } else {
+          log("No teams found in response");
+          sendResponse({
+            success: false,
+            error: "未找到团队数据"
+          });
+        }
       } catch (error) {
-        log("Error checking historical tweet:", error);
+        log("Error fetching teams:", error);
         sendResponse({
-          isHistorical: false,
-          shouldSync: false,
+          success: false,
+          error: error.message || "获取团队列表失败"
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_LINEAR_TEAM") {
+    // 获取当前配置的团队信息
+    (async () => {
+      try {
+        const teamId = await Storage.get(Storage.KEYS.LINEAR_TEAM_ID);
+
+        if (!teamId) {
+          sendResponse({ success: false, error: "未配置团队 ID" });
+          return;
+        }
+
+        // 查询团队详情
+        const query = `
+          query($teamId: String!) {
+            team(id: $teamId) {
+              id
+              name
+              key
+            }
+          }
+        `;
+
+        const result = await LinearAPI.requestWithRetry(query, { teamId });
+
+        if (result && result.team) {
+          sendResponse({
+            success: true,
+            teamId: result.team.id,
+            teamName: result.team.name,
+            teamKey: result.team.key
+          });
+        } else {
+          sendResponse({
+            success: false,
+            error: "团队不存在"
+          });
+        }
+      } catch (error) {
+        log("Error getting team info:", error);
+        sendResponse({
+          success: false,
           error: error.message
         });
       }
@@ -426,34 +830,135 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === "CLEAR_SYNC_HISTORY") {
-    // 清除同步历史
+  if (message.type === "SET_LINEAR_TEAM") {
+    // 设置团队配置
     (async () => {
       try {
-        await Storage.clearSyncHistory();
-        log("Sync history cleared");
-        sendResponse({ success: true });
+        log("Setting Linear team:", message.teamId);
+        const result = await LinearAPI.validateTeamId(message.teamId);
+
+        if (result.valid) {
+          log("Team validated successfully:", result.team);
+          sendResponse({
+            success: true,
+            team: result.team
+          });
+        } else {
+          log("Team validation failed:", result.error);
+          sendResponse({
+            success: false,
+            error: result.error
+          });
+        }
       } catch (error) {
-        log("Error clearing sync history:", error);
-        sendResponse({ success: false, error: error.message });
+        log("Error setting team:", error);
+        sendResponse({
+          success: false,
+          error: error.message
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_DEBUG_INFO") {
+    // 获取调试信息
+    (async () => {
+      try {
+        log("Getting debug info...");
+
+        // 获取存储数据
+        const allData = await chrome.storage.local.get(null);
+        const token = await Storage.getLinearToken();
+        const teamId = await Storage.getLinearTeamId();
+
+        // 计算存储使用情况
+        const storageSize = JSON.stringify(allData).length;
+        const maxStorageSize = chrome.storage.local.QUOTA_BYTES || 5242880; // 5MB default
+        const storagePercentage = (storageSize / maxStorageSize) * 100;
+
+        const debugInfo = {
+          storage: {
+            linearToken: token ? "已配置" : "未配置",
+            linearTeamId: teamId ? "已配置" : "未配置",
+            storageUsage: {
+              bytes: storageSize,
+              max: maxStorageSize,
+              percentage: storagePercentage
+            },
+            queueSize: 0, // TODO: 实现队列大小统计
+            allKeys: Object.keys(allData).sort()
+          },
+          config: allData.auroraConfig || {},
+          timestamp: new Date().toISOString()
+        };
+
+        log("Debug info collected:", debugInfo);
+        sendResponse(debugInfo);
+      } catch (error) {
+        log("Error getting debug info:", error);
+        sendResponse({
+          error: error.message,
+          storage: {
+            linearToken: "错误",
+            linearTeamId: "错误",
+            storageUsage: { bytes: 0, max: 0, percentage: 0 },
+            queueSize: 0,
+            allKeys: []
+          }
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_SYNC_STATS") {
+    // 获取同步统计
+    (async () => {
+      try {
+        const stats = await Storage.get(Storage.KEYS.SYNC_STATS) || {
+          totalSynced: 0,
+          todaySynced: 0,
+          lastSyncDate: null
+        };
+
+        // 检查是否是新的一天，如果是则重置今日统计
+        const today = new Date().toDateString();
+        if (stats.lastSyncDate !== today) {
+          stats.todaySynced = 0;
+        }
+
+        sendResponse(stats);
+      } catch (error) {
+        log("Error getting sync stats:", error);
+        sendResponse({
+          totalSynced: 0,
+          todaySynced: 0,
+          lastSyncDate: null
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_RECENT_POSTS") {
+    // 获取最近同步的帖子
+    (async () => {
+      try {
+        const limit = message.limit || 10;
+        const recentPosts = await Storage.get(Storage.KEYS.RECENT_POSTS) || [];
+
+        // 返回指定数量的最近帖子
+        sendResponse(recentPosts.slice(0, limit));
+      } catch (error) {
+        log("Error getting recent posts:", error);
+        sendResponse([]);
       }
     })();
     return true;
   }
 
   return false;
-});
-
-/**
- * 定期处理队列(每 5 分钟)
- */
-chrome.alarms.create("processQueue", { periodInMinutes: 5 });
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "processQueue") {
-    log("Alarm triggered: processQueue");
-    processQueuedTweets();
-  }
 });
 
 /**
@@ -478,14 +983,6 @@ chrome.runtime.onInstalled.addListener((details) => {
  */
 chrome.runtime.onStartup.addListener(() => {
   log("Extension started");
-
-  // 检查是否有待处理的队列
-  Storage.getSyncQueue().then((queue) => {
-    if (queue.length > 0) {
-      log(`Found ${queue.length} tweets in queue on startup`);
-      processQueuedTweets();
-    }
-  });
 });
 
 log("Service worker initialized");

@@ -11,12 +11,14 @@
         }
 
         body {
-            width: 360px;
-            min-height: 400px;
+            width: 480px;
+            min-height: 500px;
+            max-height: 600px;
             padding: 16px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             color: #333;
+            overflow-y: auto;
         }
 
         .container {
@@ -90,6 +92,12 @@
             margin-bottom: 12px;
         }
 
+        .preview-queue {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 16px;
+        }
+
         .recent-posts {
             max-height: 200px;
             overflow-y: auto;
@@ -125,6 +133,122 @@
             font-size: 0.7rem;
             color: #9ca3af;
             margin-top: 4px;
+        }
+
+        .preview-item {
+            padding: 12px;
+            border-left: 3px solid #f59e0b;
+            background: #fef3c7;
+            margin-bottom: 8px;
+            border-radius: 4px;
+            font-size: 0.875rem;
+            position: relative;
+        }
+
+        .preview-item.status-pending {
+            border-left-color: #f59e0b;
+            background: #fef3c7;
+        }
+
+        .preview-item.status-confirmed {
+            border-left-color: #10b981;
+            background: #d1fae5;
+        }
+
+        .preview-item-status {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-weight: 600;
+        }
+
+        .preview-item.status-pending .preview-item-status {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .preview-item.status-confirmed .preview-item-status {
+            background: #10b981;
+            color: white;
+        }
+
+        .preview-actions {
+            display: flex;
+            gap: 4px;
+            margin-top: 8px;
+        }
+
+        .preview-btn {
+            padding: 4px 8px;
+            border: none;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .preview-btn-confirm {
+            background: #10b981;
+            color: white;
+        }
+
+        .preview-btn-confirm:hover {
+            background: #059669;
+        }
+
+        .preview-btn-skip {
+            background: #6b7280;
+            color: white;
+        }
+
+        .preview-btn-skip:hover {
+            background: #4b5563;
+        }
+
+        .preview-auto-time {
+            font-size: 0.65rem;
+            color: #92400e;
+            margin-top: 4px;
+        }
+
+        .batch-actions {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .batch-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .batch-confirm-all {
+            background: #10b981;
+            color: white;
+        }
+
+        .batch-confirm-all:hover {
+            background: #059669;
+        }
+
+        .batch-skip-all {
+            background: #6b7280;
+            color: white;
+        }
+
+        .batch-skip-all:hover {
+            background: #4b5563;
         }
 
         .empty-state {
@@ -241,6 +365,12 @@
             </div>
         </div>
 
+        <!-- 待同步预览 -->
+        <div class="section-title" id="previewSectionTitle" style="display: none;">待同步预览 <span id="previewCount" style="color: #667eea; font-weight: normal;"></span></div>
+        <div class="preview-queue" id="previewQueue" style="display: none;">
+            <div class="loading">加载中...</div>
+        </div>
+
         <!-- 最近帖子 -->
         <div class="section-title">最近同步</div>
         <div class="recent-posts" id="recentPosts">
@@ -309,6 +439,58 @@
             </div>
             <div style="font-size: 0.7rem; color: #6b7280; margin: 4px 0 8px 0;">
                 ⚠️ 启用后会尝试同步您过去在 X.com 上点赞的所有帖子
+            </div>
+
+            <div class="section-title" style="margin-top: 16px;">标题生成设置</div>
+
+            <div style="margin: 8px 0;">
+                <label style="font-size: 0.875rem; color: #374151; display: block; margin-bottom: 4px;">标题生成方式</label>
+                <select id="titleStyleSelect" class="token-input" style="width: 100%;">
+                    <option value="smart">智能生成（推荐）</option>
+                    <option value="content">仅推文内容</option>
+                    <option value="author">作者名优先</option>
+                </select>
+            </div>
+
+            <div style="margin: 8px 0;">
+                <label style="font-size: 0.875rem; color: #374151; display: block; margin-bottom: 4px;">
+                    标题最大长度: <span id="titleLengthValue">100</span> 字符
+                </label>
+                <input type="range" id="titleMaxLengthSlider" min="50" max="200" value="100" style="width: 100%;">
+            </div>
+
+            <div class="section-title" style="margin-top: 16px;">标签设置</div>
+
+            <div style="display: flex; align-items: center; justify-content: space-between; margin: 8px 0;">
+                <label style="font-size: 0.875rem; color: #374151; cursor: pointer;">
+                    <input type="checkbox" id="enableSmartLabels" style="margin-right: 8px;">
+                    启用智能标签分类
+                </label>
+                <span style="font-size: 0.7rem; color: #9ca3af;" id="smartLabelsStatus">已启用</span>
+            </div>
+
+            <div style="margin: 8px 0;">
+                <label style="font-size: 0.875rem; color: #374151; display: block; margin-bottom: 4px;">标签分类</label>
+                <div id="labelCategoriesContainer" style="display: flex; flex-wrap: wrap; gap: 4px;">
+                    <!-- 动态生成标签复选框 -->
+                </div>
+            </div>
+
+            <div class="section-title" style="margin-top: 16px;">同步设置</div>
+
+            <div style="display: flex; align-items: center; justify-content: space-between; margin: 8px 0;">
+                <label style="font-size: 0.875rem; color: #374151; cursor: pointer;">
+                    <input type="checkbox" id="enablePreview" style="margin-right: 8px;">
+                    启用同步预览
+                </label>
+                <span style="font-size: 0.7rem; color: #9ca3af;" id="previewStatus">已启用</span>
+            </div>
+
+            <div style="margin: 8px 0;">
+                <label style="font-size: 0.875rem; color: #374151; display: block; margin-bottom: 4px;">
+                    自动同步延迟: <span id="autoSyncDelayValue">3</span> 秒
+                </label>
+                <input type="range" id="autoSyncDelaySlider" min="1" max="10" value="3" style="width: 100%;">
             </div>
 
             <div style="display: flex; gap: 8px; margin-top: 12px;">

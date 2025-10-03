@@ -65,6 +65,7 @@
 
   /**
    * 从贴文 DOM 元素中提取数据
+   * @returns {Object|null} 返回推文数据对象，或特殊状态对象 { status: 'already_processed', tweetId }
    */
   function extractTweetData(tweetElement) {
     try {
@@ -103,8 +104,8 @@
       }
 
       if (seenTweets.has(tweetId)) {
-        log(`贴文已处理: ${tweetId}`);
-        return null;
+        log(`贴文已处理（去重）: ${tweetId}`);
+        return { status: 'already_processed', tweetId };
       }
 
       // 更新作者信息选择器
@@ -381,13 +382,23 @@
 
         log("检测到点赞按钮点击");
 
+        // 用于跟踪是否已成功处理
+        let processed = false;
+        const timeoutIds = [];
+
         // 增加延迟时间，确保 DOM 更新完成
         const delays = [200, 500, 800]; // 尝试多个延迟时间
-        delays.forEach(delay => {
-          setTimeout(() => {
+        delays.forEach((delay, index) => {
+          const timeoutId = setTimeout(() => {
             try {
+              // 如果已经成功处理，取消后续延迟
+              if (processed) {
+                log(`跳过后续检查 (${delay}ms 延迟)，推文已处理`);
+                return;
+              }
+
               if (isLiked(likeButton)) {
-                log("确认点赞状态，开始提取贴文数据");
+                log(`确认点赞状态 (${delay}ms 延迟)，开始提取贴文数据`);
 
                 // 更新贴文容器选择器
                 const tweetElementSelectors = [
@@ -412,16 +423,28 @@
                 }
 
                 const tweetData = extractTweetData(tweetElement);
-                if (tweetData) {
+                if (tweetData && tweetData.status === 'already_processed') {
+                  // 推文已处理，这是正常的去重行为
+                  log(`✓ 推文 ${tweetData.tweetId} 已在队列中（去重成功）`);
+                  processed = true; // 标记为已处理，取消后续延迟
+                  // 取消剩余的超时
+                  timeoutIds.slice(index + 1).forEach(id => clearTimeout(id));
+                } else if (tweetData) {
                   sendTweetData(tweetData);
+                  log(`✓ 成功提取并发送推文: ${tweetData.tweetId}`);
+                  processed = true; // 标记为已处理，取消后续延迟
+                  // 取消剩余的超时
+                  timeoutIds.slice(index + 1).forEach(id => clearTimeout(id));
                 } else {
-                  log("提取贴文数据失败");
+                  log(`⚠ 提取贴文数据失败（尝试 ${index + 1}/${delays.length}）`);
                 }
               }
             } catch (error) {
               log(`检查点赞状态时出错 (${delay}ms 延迟):`, error);
             }
           }, delay);
+
+          timeoutIds.push(timeoutId);
         });
       },
       true // 使用捕获阶段确保能捕获到事件

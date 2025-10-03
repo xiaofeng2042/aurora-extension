@@ -15,6 +15,7 @@ const Storage = {
     INSTALL_TIMESTAMP: "installTimestamp", // 扩展安装时间戳
     SYNC_HISTORICAL_LIKES: "syncHistoricalLikes", // 是否同步历史点赞
     CONFIG: "auroraConfig", // 扩展配置
+    PREVIEW_QUEUE: "previewQueue", // 待预览确认的同步队列
   },
 
   /**
@@ -245,6 +246,109 @@ const Storage = {
     await this.set(this.KEYS.SYNC_QUEUE, filtered);
   },
 
+  // === 预览队列管理 ===
+
+  /**
+   * 添加到预览队列
+   */
+  async addToPreviewQueue(post, autoSyncDelay = 3000) {
+    const queue = (await this.get(this.KEYS.PREVIEW_QUEUE)) || [];
+
+    // 检查是否已在队列中
+    const existingIndex = queue.findIndex(item => item.tweetId === post.tweetId);
+    if (existingIndex !== -1) {
+      // 如果已存在，更新时间戳
+      queue[existingIndex].addedAt = new Date().toISOString();
+    } else {
+      // 添加新项目
+      queue.push({
+        ...post,
+        addedAt: new Date().toISOString(),
+        autoSyncAt: new Date(Date.now() + autoSyncDelay).toISOString(),
+        status: 'pending' // pending, confirmed, skipped
+      });
+    }
+
+    await this.set(this.KEYS.PREVIEW_QUEUE, queue);
+    return queue;
+  },
+
+  /**
+   * 获取预览队列
+   */
+  async getPreviewQueue() {
+    return (await this.get(this.KEYS.PREVIEW_QUEUE)) || [];
+  },
+
+  /**
+   * 从预览队列中确认同步
+   */
+  async confirmPreviewItem(tweetId) {
+    const queue = (await this.get(this.KEYS.PREVIEW_QUEUE)) || [];
+    const updated = queue.map((item) => {
+      if (item.tweetId === tweetId) {
+        return { ...item, status: 'confirmed', confirmedAt: new Date().toISOString() };
+      }
+      return item;
+    });
+    await this.set(this.KEYS.PREVIEW_QUEUE, updated);
+  },
+
+  /**
+   * 从预览队列中跳过同步
+   */
+  async skipPreviewItem(tweetId) {
+    const queue = (await this.get(this.KEYS.PREVIEW_QUEUE)) || [];
+    const updated = queue.map((item) => {
+      if (item.tweetId === tweetId) {
+        return { ...item, status: 'skipped', skippedAt: new Date().toISOString() };
+      }
+      return item;
+    });
+    await this.set(this.KEYS.PREVIEW_QUEUE, updated);
+  },
+
+  /**
+   * 从预览队列移除
+   */
+  async removeFromPreviewQueue(tweetId) {
+    const queue = (await this.get(this.KEYS.PREVIEW_QUEUE)) || [];
+    const filtered = queue.filter((item) => item.tweetId !== tweetId);
+    await this.set(this.KEYS.PREVIEW_QUEUE, filtered);
+  },
+
+  /**
+   * 获取需要自动同步的项目（已过自动同步时间的待确认项目）
+   */
+  async getAutoSyncItems() {
+    const queue = (await this.get(this.KEYS.PREVIEW_QUEUE)) || [];
+    const now = new Date();
+
+    return queue.filter(item =>
+      item.status === 'pending' &&
+      new Date(item.autoSyncAt) <= now
+    );
+  },
+
+  /**
+   * 清理过期的预览项目
+   */
+  async cleanupPreviewQueue() {
+    const queue = (await this.get(this.KEYS.PREVIEW_QUEUE)) || [];
+    const now = new Date();
+    const expireTime = 24 * 60 * 60 * 1000; // 24小时
+
+    const filtered = queue.filter(item => {
+      const itemTime = new Date(item.addedAt);
+      return now - itemTime < expireTime;
+    });
+
+    if (filtered.length !== queue.length) {
+      await this.set(this.KEYS.PREVIEW_QUEUE, filtered);
+      console.log(`[Storage] Cleaned up preview queue: ${queue.length} -> ${filtered.length}`);
+    }
+  },
+
   /**
    * 更新队列中项目的重试次数
    */
@@ -282,15 +386,97 @@ const Storage = {
    * 获取扩展配置
    */
   async getConfig() {
-    const config = await this.get(this.KEYS.CONFIG);
+    let config = await this.get(this.KEYS.CONFIG);
+
+    // 执行配置迁移
+    config = await this.migrateConfig(config);
+
     return {
       // 默认配置
       syncHistoricalLikes: false,
       maxSyncedTweetsCache: 1000,
       cleanupDays: 30,
       enableNotifications: true,
+      // 新增配置的默认值
+      titleStyle: 'smart',
+      titleMaxLength: 100,
+      enableSmartLabels: true,
+      labelCategories: ['technology', 'business', 'entertainment', 'sports', 'politics', 'science'],
+      enablePreview: true,
+      autoSyncDelay: 3000,
+      batchSize: 5,
+      batchDelay: 2000,
       ...config
     };
+  }
+
+/**
+   * 配置迁移逻辑
+   */
+  async migrateConfig(config = {}) {
+    const currentVersion = config.version || 0;
+    const latestVersion = 1;
+
+    if (currentVersion >= latestVersion) {
+      return config;
+    }
+
+    let migratedConfig = { ...config };
+
+    // 迁移版本 0 -> 1: 添加新的配置项
+    if (currentVersion < 1) {
+      addDebugLog("执行配置迁移 v0 -> v1");
+
+      // 迁移旧的同步历史点赞设置
+      if (migratedConfig.syncHistoricalLikes === undefined) {
+        const oldValue = await this.get(this.KEYS.SYNC_HISTORICAL_LIKES);
+        if (oldValue !== undefined) {
+          migratedConfig.syncHistoricalLikes = oldValue;
+        }
+      }
+
+      // 添加新的配置项并设置默认值
+      if (migratedConfig.titleStyle === undefined) {
+        migratedConfig.titleStyle = 'smart';
+      }
+      if (migratedConfig.titleMaxLength === undefined) {
+        migratedConfig.titleMaxLength = 100;
+      }
+      if (migratedConfig.enableSmartLabels === undefined) {
+        migratedConfig.enableSmartLabels = true;
+      }
+      if (migratedConfig.labelCategories === undefined) {
+        migratedConfig.labelCategories = ['technology', 'business', 'entertainment', 'sports', 'politics', 'science'];
+      }
+      if (migratedConfig.enablePreview === undefined) {
+        migratedConfig.enablePreview = true;
+      }
+      if (migratedConfig.autoSyncDelay === undefined) {
+        migratedConfig.autoSyncDelay = 3000;
+      }
+
+      // 更新版本号
+      migratedConfig.version = 1;
+
+      // 保存迁移后的配置
+      await this.set(this.KEYS.CONFIG, migratedConfig);
+
+      console.log("[Storage] 配置迁移完成", {
+        fromVersion: currentVersion,
+        toVersion: 1,
+        newConfig: migratedConfig
+      });
+    }
+
+    return migratedConfig;
+  }
+
+  /**
+   * 获取配置版本信息
+   */
+  async getConfigVersion() {
+    const config = await this.get(this.KEYS.CONFIG);
+    return config?.version || 0;
   },
 
   /**
@@ -299,6 +485,45 @@ const Storage = {
   async setConfig(config) {
     const currentConfig = await this.getConfig();
     const newConfig = { ...currentConfig, ...config };
+    return await this.set(this.KEYS.CONFIG, newConfig);
+  },
+
+  /**
+   * 获取同步配置（专门用于同步功能的配置）
+   */
+  async getSyncConfig() {
+    const config = await this.getConfig();
+    return {
+      // 标题生成配置
+      titleStyle: config.titleStyle || 'smart', // 'smart', 'content', 'author'
+      titleMaxLength: config.titleMaxLength || 100,
+
+      // 标签配置
+      enableSmartLabels: config.enableSmartLabels !== false, // 默认启用
+      labelCategories: config.labelCategories || [
+        'technology', 'business', 'entertainment', 'sports', 'politics', 'science'
+      ],
+
+      // 预览配置
+      enablePreview: config.enablePreview !== false, // 默认启用预览
+      autoSyncDelay: config.autoSyncDelay || 3000, // 自动同步延迟（毫秒）
+
+      // 批量处理配置
+      batchSize: config.batchSize || 5,
+      batchDelay: config.batchDelay || 2000,
+
+      // 其他配置
+      enableNotifications: config.enableNotifications !== false,
+      syncHistoricalLikes: config.syncHistoricalLikes === true
+    };
+  },
+
+  /**
+   * 设置同步配置
+   */
+  async setSyncConfig(syncConfig) {
+    const currentConfig = await this.getConfig();
+    const newConfig = { ...currentConfig, ...syncConfig };
     return await this.set(this.KEYS.CONFIG, newConfig);
   },
 
