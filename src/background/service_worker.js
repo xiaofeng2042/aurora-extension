@@ -511,6 +511,53 @@ function log(...args) {
   if (DEBUG) console.log("[Aurora Background]", ...args);
 }
 
+// 跟踪正在处理和已处理的推文，避免重复同步
+const inFlightTweetSyncs = new Set();
+let syncedTweetsCache = null;
+
+function normalizeSyncedTweets(rawValue) {
+  if (!rawValue) {
+    return new Set();
+  }
+
+  if (rawValue instanceof Set) {
+    return new Set(Array.from(rawValue).filter(Boolean));
+  }
+
+  if (Array.isArray(rawValue)) {
+    return new Set(rawValue.filter(Boolean));
+  }
+
+  if (typeof rawValue === "string") {
+    return new Set([rawValue].filter(Boolean));
+  }
+
+  if (typeof rawValue === "object") {
+    return new Set(Object.values(rawValue).filter(Boolean));
+  }
+
+  return new Set();
+}
+
+async function getSyncedTweetsSet() {
+  if (syncedTweetsCache instanceof Set) {
+    return syncedTweetsCache;
+  }
+
+  const storedValue = await Storage.get(Storage.KEYS.SYNCED_TWEETS);
+  syncedTweetsCache = normalizeSyncedTweets(storedValue);
+  return syncedTweetsCache;
+}
+
+async function persistSyncedTweetsSet(syncedSet) {
+  const idsToPersist = Array.from(syncedSet).filter(Boolean);
+  const stored = await Storage.set(Storage.KEYS.SYNCED_TWEETS, idsToPersist);
+  if (stored === false) {
+    throw new Error("Failed to persist synced tweets");
+  }
+  syncedTweetsCache = syncedSet;
+}
+
 // 同步状态
 const syncState = {
   isSync: false,
@@ -521,38 +568,61 @@ const syncState = {
  * 处理新的点赞推文
  */
 async function handleNewLikedPost(tweetData) {
-  log("Handling new liked post:", tweetData.tweetId);
+  const tweetId = tweetData?.tweetId;
+  log("Handling new liked post:", tweetId);
+
+  if (!tweetId) {
+    log("Skipping sync: missing tweetId in payload");
+    return {
+      success: false,
+      error: "Missing tweetId",
+      skipped: true,
+    };
+  }
+
+  if (inFlightTweetSyncs.has(tweetId)) {
+    log("Tweet sync already in progress, skipping:", tweetId);
+    return {
+      success: true,
+      message: "Tweet sync already in progress",
+      skipped: true,
+    };
+  }
+
+  inFlightTweetSyncs.add(tweetId);
 
   try {
-    // 1. 检查是否已同步过
-    const syncedTweets = await Storage.get(Storage.KEYS.SYNCED_TWEETS) || new Set();
-    if (syncedTweets.has?.(tweetData.tweetId) || Array.from(syncedTweets || []).includes(tweetData.tweetId)) {
-      log("Tweet already synced:", tweetData.tweetId);
+    const syncedTweetsSet = await getSyncedTweetsSet();
+    if (syncedTweetsSet.has(tweetId)) {
+      log("Tweet already synced (cache hit):", tweetId);
       return { success: true, message: "Tweet already synced", skipped: true };
     }
 
-    // 2. 同步到 Linear
+    // 同步到 Linear
     const result = await LinearAPI.syncTweet(tweetData);
 
     if (result.success) {
-      log("✓ Successfully synced tweet to Linear:", tweetData.tweetId);
+      log("✓ Successfully synced tweet to Linear:", tweetId);
 
-      // 3. 记录已同步的推文
-      const updatedSet = new Set(syncedTweets || []);
-      updatedSet.add(tweetData.tweetId);
-      await Storage.set(Storage.KEYS.SYNCED_TWEETS, Array.from(updatedSet));
+      // 记录已同步的推文
+      syncedTweetsSet.add(tweetId);
+      try {
+        await persistSyncedTweetsSet(syncedTweetsSet);
+      } catch (storageError) {
+        log("Failed to persist synced tweets cache:", storageError);
+      }
 
-      // 4. 更新统计
+      // 更新统计
       await updateSyncStats(tweetData, result.data);
 
-      // 5. 添加到最近帖子列表
+      // 添加到最近帖子列表
       await addRecentPost(tweetData, result.data);
 
-      // 6. 通知 popup 更新
+      // 通知 popup 更新
       notifyPopup({
         type: "SYNC_SUCCESS",
         payload: {
-          tweetId: tweetData.tweetId,
+          tweetId,
           linearIssue: result.data
         }
       });
@@ -562,29 +632,30 @@ async function handleNewLikedPost(tweetData) {
         message: "Tweet synced successfully",
         data: result.data
       };
-    } else {
-      log("✗ Failed to sync tweet:", result.error);
-
-      // 通知同步失败
-      notifyPopup({
-        type: "SYNC_ERROR",
-        payload: {
-          tweetId: tweetData.tweetId,
-          error: result.error
-        }
-      });
-
-      return {
-        success: false,
-        error: result.error
-      };
     }
+
+    log("✗ Failed to sync tweet:", result.error);
+
+    notifyPopup({
+      type: "SYNC_ERROR",
+      payload: {
+        tweetId,
+        error: result.error
+      }
+    });
+
+    return {
+      success: false,
+      error: result.error
+    };
   } catch (error) {
     log("Error handling liked post:", error);
     return {
       success: false,
       error: error.message,
     };
+  } finally {
+    inFlightTweetSyncs.delete(tweetId);
   }
 }
 
